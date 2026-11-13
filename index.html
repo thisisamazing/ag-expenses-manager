@@ -13,6 +13,9 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <!-- SheetJS for Excel Exports & Imports -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- Firebase App & Firestore Compat SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-900 font-sans">
   <div id="root"></div>
@@ -21,6 +24,32 @@
     const { useState, useEffect, useMemo, useRef } = React;
 
     const CURRENT_STORAGE_KEY = 'family_receipts_master_v1';
+
+    // FIREBASE CLOUD CONFIGURATION & INITIALIZATION
+    const firebaseConfig = {
+      apiKey: "AIzaSyCvZAfP0kUmiIPkrkhht5XoIYUDIe8c-b0",
+      authDomain: "ag-receipt-manager.firebaseapp.com",
+      projectId: "ag-receipt-manager",
+      storageBucket: "ag-receipt-manager.firebasestorage.app",
+      messagingSenderId: "1094622572866",
+      appId: "1:1094622572866:web:d7c423842126847b28d8db",
+      measurementId: "G-388EKDGKLM"
+    };
+
+    let db = null;
+    try {
+      if (window.firebase && !window.firebase.apps.length) {
+        window.firebase.initializeApp(firebaseConfig);
+      }
+      if (window.firebase) {
+        db = window.firebase.firestore();
+        db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
+          console.warn("Firestore offline persistence notice:", err.code);
+        });
+      }
+    } catch (e) {
+      console.error("Firebase init error:", e);
+    }
 
     // MULTI-VERSION DATA RECOVERY ENGINE
     const loadStoredReceiptsWithMigration = (defaultReceipts) => {
@@ -133,6 +162,8 @@
       const [receipts, setReceipts] = useState(() => {
         return loadStoredReceiptsWithMigration(INITIAL_RECEIPTS);
       });
+      const [isCloudConnected, setIsCloudConnected] = useState(false);
+      const [isSyncing, setIsSyncing] = useState(true);
 
       const [members] = useState(DEFAULT_MEMBERS);
       const [selectedMember, setSelectedMember] = useState('nikos');
@@ -191,14 +222,44 @@
         setDialogState({ isOpen: true, type: 'confirm', message, onConfirm });
       };
 
-      // Auto-save across master key AND fallback keys to guarantee safety
+      // REAL-TIME FIRESTORE LISTENER (Live sync between Nikos & Anthi)
       useEffect(() => {
-        localStorage.setItem(CURRENT_STORAGE_KEY, JSON.stringify(receipts));
-        localStorage.setItem('family_receipts_v18', JSON.stringify(receipts));
-      }, [receipts]);
+        if (!db) {
+          setIsSyncing(false);
+          return;
+        }
+
+        setIsSyncing(true);
+        const unsubscribe = db.collection('receipts').onSnapshot(
+          (snapshot) => {
+            const items = [];
+            snapshot.forEach((doc) => {
+              items.push({ id: doc.id, ...doc.data() });
+            });
+            setReceipts(items);
+            setIsCloudConnected(true);
+            setIsSyncing(false);
+
+            // Local cache mirror
+            try {
+              localStorage.setItem(CURRENT_STORAGE_KEY, JSON.stringify(items));
+            } catch (err) {}
+          },
+          (error) => {
+            console.error("Firestore real-time sync error:", error);
+            setIsSyncing(false);
+          }
+        );
+
+        return () => unsubscribe();
+      }, []);
+
+      // Active vs Soft-deleted receipts
+      const activeReceipts = useMemo(() => receipts.filter(r => !r.isDeleted), [receipts]);
+      const deletedReceipts = useMemo(() => receipts.filter(r => r.isDeleted), [receipts]);
 
       const exportBackupJSON = () => {
-        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(receipts, null, 2));
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(activeReceipts, null, 2));
         const downloadAnchor = document.createElement('a');
         downloadAnchor.setAttribute("href", dataStr);
         downloadAnchor.setAttribute("download", `Family_Expenses_Backup_${new Date().toISOString().slice(0, 10)}.json`);
@@ -211,11 +272,27 @@
         const fileReader = new FileReader();
         if (e.target.files[0]) {
           fileReader.readAsText(e.target.files[0], "UTF-8");
-          fileReader.onload = (event) => {
+          fileReader.onload = async (event) => {
             try {
               const parsed = JSON.parse(event.target.result);
-              if (Array.isArray(parsed)) {
-                setReceipts(parsed);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                if (db) {
+                  setIsSyncing(true);
+                  const BATCH_SIZE = 400;
+                  for (let i = 0; i < parsed.length; i += BATCH_SIZE) {
+                    const chunk = parsed.slice(i, i + BATCH_SIZE);
+                    const batch = db.batch();
+                    chunk.forEach((item) => {
+                      const id = item.id || `rec_bak_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                      const docRef = db.collection('receipts').doc(id);
+                      batch.set(docRef, { ...item, id, isDeleted: item.isDeleted || false }, { merge: true });
+                    });
+                    await batch.commit();
+                  }
+                  setIsSyncing(false);
+                } else {
+                  setReceipts(parsed);
+                }
                 showAlert(`Επιτυχής επαναφορά ${parsed.length} εγγραφών!`);
               }
             } catch (err) {
@@ -225,12 +302,77 @@
         }
       };
 
-      const saveReceipt = (newRec) => {
-        setReceipts(prev => [newRec, ...prev.filter(r => r.id !== newRec.id)]);
+      // Permanent Save to Cloud Firestore
+      const saveReceipt = async (newRec) => {
+        const recId = newRec.id || `rec_${Date.now()}`;
+        const cleanData = {
+          ...newRec,
+          id: recId,
+          isDeleted: newRec.isDeleted || false,
+          updatedAt: new Date().toISOString()
+        };
+
+        if (db) {
+          try {
+            await db.collection('receipts').doc(recId).set(cleanData, { merge: true });
+          } catch (err) {
+            console.error("Firestore save error:", err);
+            showAlert("Σφάλμα αποθήκευσης στο Cloud: " + err.message);
+          }
+        } else {
+          setReceipts(prev => [cleanData, ...prev.filter(r => r.id !== recId)]);
+        }
       };
 
-      const removeReceipt = (id) => {
-        setReceipts(prev => prev.filter(r => r.id !== id));
+      // Soft-Delete (Moves to Trash - Protection from Accidental Deletion)
+      const softDeleteReceipt = async (id) => {
+        if (db) {
+          try {
+            await db.collection('receipts').doc(id).set({
+              isDeleted: true,
+              deletedAt: new Date().toISOString(),
+              deletedBy: selectedMember
+            }, { merge: true });
+            showAlert("Η απόδειξη μεταφέρθηκε στον Κάδο Ανακύκλωσης.");
+          } catch (err) {
+            showAlert("Σφάλμα διαγραφής: " + err.message);
+          }
+        } else {
+          setReceipts(prev => prev.map(r => r.id === id ? { ...r, isDeleted: true } : r));
+        }
+      };
+
+      // Restore from Trash
+      const restoreReceiptFromTrash = async (id) => {
+        if (db) {
+          try {
+            await db.collection('receipts').doc(id).set({
+              isDeleted: false,
+              deletedAt: null
+            }, { merge: true });
+            showAlert("Η απόδειξη επανήλθε επιτυχώς!");
+          } catch (err) {
+            showAlert("Σφάλμα επαναφοράς: " + err.message);
+          }
+        } else {
+          setReceipts(prev => prev.map(r => r.id === id ? { ...r, isDeleted: false } : r));
+        }
+      };
+
+      // Permanent Delete (Only from Trash with confirmation)
+      const permanentDeleteReceipt = (id) => {
+        showConfirm("ΠΡΟΣΟΧΗ: Η απόδειξη θα διαγραφεί ΟΡΙΣΤΙΚΑ από τη βάση δεδομένων. Είστε σίγουρος;", async () => {
+          if (db) {
+            try {
+              await db.collection('receipts').doc(id).delete();
+              showAlert("Η απόδειξη διαγράφηκε οριστικά.");
+            } catch (err) {
+              showAlert("Σφάλμα οριστικής διαγραφής: " + err.message);
+            }
+          } else {
+            setReceipts(prev => prev.filter(r => r.id !== id));
+          }
+        });
       };
 
       const handleSort = (field) => {
@@ -246,133 +388,165 @@
         const file = e.target.files[0];
         if (!file) return;
 
+        setIsSyncing(true);
         const reader = new FileReader();
-        reader.onload = (evt) => {
-          const XLSX = window.XLSX;
-          const bstr = evt.target.result;
-          const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
-          const wsname = wb.SheetNames[0];
-          const ws = wb.Sheets[wsname];
-          const data = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' });
+        reader.onload = async (evt) => {
+          try {
+            const XLSX = window.XLSX;
+            const bstr = evt.target.result;
+            const wb = XLSX.read(bstr, { type: 'binary', cellDates: true });
+            const wsname = wb.SheetNames[0];
+            const ws = wb.Sheets[wsname];
+            const data = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' });
 
-          let importedCount = 0;
+            const newItems = [];
 
-          data.forEach((row, index) => {
-            // Flexible header detection for amount
-            const rawAmount = row['Σύνολο (€)'] || row['Σύνολο'] || row['Ποσό (€)'] || row['Ποσό'] || row['Amount'] || row['TOTAL'] || row['Τιμή'] || row['Ποσο'];
-            const parsedTotal = parseFloat(String(rawAmount).replace(',', '.'));
+            data.forEach((row, index) => {
+              // Flexible header detection for amount
+              const rawAmount = row['Σύνολο (€)'] || row['Σύνολο'] || row['Ποσό (€)'] || row['Ποσό'] || row['Amount'] || row['TOTAL'] || row['Τιμή'] || row['Ποσο'];
+              const parsedTotal = parseFloat(String(rawAmount).replace(',', '.'));
 
-            if (isNaN(parsedTotal) || parsedTotal <= 0) return;
+              if (isNaN(parsedTotal) || parsedTotal <= 0) return;
 
-            // Flexible header detection for Merchant / Store name
-            let merchantVal = '';
-            for (const key of Object.keys(row)) {
-              const kLower = key.toLowerCase();
-              if (kLower.includes('κατάστημα') || kLower.includes('καταστημα') || kLower.includes('παραλήπτης') || kLower.includes('παραληπτης') || kLower.includes('merchant') || kLower.includes('προμηθευτής')) {
-                merchantVal = String(row[key]).trim();
-                if (merchantVal) break;
+              // Flexible header detection for Merchant / Store name
+              let merchantVal = '';
+              for (const key of Object.keys(row)) {
+                const kLower = key.toLowerCase();
+                if (kLower.includes('κατάστημα') || kLower.includes('καταστημα') || kLower.includes('παραλήπτης') || kLower.includes('παραληπτης') || kLower.includes('merchant') || kLower.includes('προμηθευτής')) {
+                  merchantVal = String(row[key]).trim();
+                  if (merchantVal) break;
+                }
               }
-            }
-            if (!merchantVal) {
-              merchantVal = String(row['Κατάστημα / Παραλήπτης'] || row['Κατάστημα'] || row['Παραλήπτης'] || '').trim();
-            }
-
-            // Flexible header detection for Category
-            const rawCat = (row['Κατηγορία Εξόδου'] || row['Κατηγορία'] || row['Category'] || row['Είδος Εξόδου'] || '').toString().trim();
-
-            let categoryKey = 'Uncategorized';
-            if (rawCat) {
-              const catLower = rawCat.toLowerCase();
-              const matched = CATEGORIES.find(c => c.id.toLowerCase() === catLower || c.label.toLowerCase().includes(catLower));
-
-              if (matched) {
-                categoryKey = matched.id;
-              } else if (catLower.includes('υπεραγορ') || catLower.includes('supermarket') || catLower.includes('τροφιμ')) categoryKey = 'Supermarket';
-              else if (catLower.includes('δανει') || catLower.includes('εφορια') || catLower.includes('τραπεζ')) categoryKey = 'Loans & Tax';
-              else if (catLower.includes('καυσιμ') || catLower.includes('βενζιν') || catLower.includes('πετρελ')) categoryKey = 'Fuel & Transport';
-              else if (catLower.includes('εστιασ') || catLower.includes('φαγητ') || catLower.includes('καφε')) categoryKey = 'Dining & Coffee';
-              else if (catLower.includes('φαρμακ') || catLower.includes('γιατρ')) categoryKey = 'Health & Pharmacy';
-              else if (catLower.includes('λογαριασμ') || catLower.includes('bills')) categoryKey = 'Utilities & Bills';
-              else if (catLower.includes('σχολικ') || catLower.includes('φροντιστ')) categoryKey = 'Education & Hobbies';
-              else if (catLower.includes('ενοικιο')) categoryKey = 'Rent';
-              else if (catLower.includes('τσιγαρ')) categoryKey = 'Cigarettes';
-              else if (catLower.includes('ψωνια') || catLower.includes('δωρα')) categoryKey = 'Shopping & Gifts';
-            }
-
-            // Flexible header detection for Payer (Member)
-            const mName = (row['Πληρωτής'] || row['Μέλος'] || row['Πληρωσε'] || row['Όνομα'] || '').toString().trim();
-            const mObj = members.find(m => m.name.toLowerCase().includes(mName.toLowerCase())) || members[0];
-
-            // Flexible header detection for Beneficiary (Ποιον Αφορά) with Exact Family Name Matching
-            let ben = '';
-            for (const key of Object.keys(row)) {
-              const kLower = key.toLowerCase();
-              if (kLower.includes('αφορά') || kLower.includes('αφορα') || kLower.includes('δικαιούχος') || kLower.includes('δικαιουχος') || kLower.includes('ποιον')) {
-                ben = String(row[key]).trim();
-                if (ben) break;
+              if (!merchantVal) {
+                merchantVal = String(row['Κατάστημα / Παραλήπτης'] || row['Κατάστημα'] || row['Παραλήπτης'] || '').trim();
               }
-            }
 
-            if (!ben) ben = 'Όλη η Οικογένεια';
-            else {
-              const benLower = ben.toLowerCase();
-              if (benLower.includes('κορίτσ') || benLower.includes('κοριτσ')) {
-                ben = 'Κορίτσια (Αγγελική & Χριστίνα 50-50)';
-              } else if (benLower.includes('νίκ') || benLower.includes('νικ')) {
-                ben = 'Νίκος';
-              } else if (benLower.includes('ανθή') || benLower.includes('ανθη')) {
-                ben = 'Ανθή';
-              } else if (benLower.includes('θεοδώρα') || benLower.includes('θεοδωρα')) {
-                ben = 'Θεοδώρα';
-              } else if (benLower.includes('αγγελική') || benLower.includes('αγγελικη')) {
-                ben = 'Αγγελική';
-              } else if (benLower.includes('χριστίνα') || benLower.includes('χριστινα')) {
-                ben = 'Χριστίνα';
-              } else if (benLower.includes('οικογένει') || benLower.includes('οικογενει')) {
-                ben = 'Όλη η Οικογένεια';
+              // Flexible header detection for Category
+              const rawCat = (row['Κατηγορία Εξόδου'] || row['Κατηγορία'] || row['Category'] || row['Είδος Εξόδου'] || '').toString().trim();
+
+              let categoryKey = 'Uncategorized';
+              if (rawCat) {
+                const catLower = rawCat.toLowerCase();
+                const matched = CATEGORIES.find(c => c.id.toLowerCase() === catLower || c.label.toLowerCase().includes(catLower));
+
+                if (matched) {
+                  categoryKey = matched.id;
+                } else if (catLower.includes('υπεραγορ') || catLower.includes('supermarket') || catLower.includes('τροφιμ')) categoryKey = 'Supermarket';
+                else if (catLower.includes('δανει') || catLower.includes('εφορια') || catLower.includes('τραπεζ')) categoryKey = 'Loans & Tax';
+                else if (catLower.includes('καυσιμ') || catLower.includes('βενζιν') || catLower.includes('πετρελ')) categoryKey = 'Fuel & Transport';
+                else if (catLower.includes('εστιασ') || catLower.includes('φαγητ') || catLower.includes('καφε')) categoryKey = 'Dining & Coffee';
+                else if (catLower.includes('φαρμακ') || catLower.includes('γιατρ')) categoryKey = 'Health & Pharmacy';
+                else if (catLower.includes('λογαριασμ') || catLower.includes('bills')) categoryKey = 'Utilities & Bills';
+                else if (catLower.includes('σχολικ') || catLower.includes('φροντιστ')) categoryKey = 'Education & Hobbies';
+                else if (catLower.includes('ενοικιο')) categoryKey = 'Rent';
+                else if (catLower.includes('τσιγαρ')) categoryKey = 'Cigarettes';
+                else if (catLower.includes('ψωνια') || catLower.includes('δωρα')) categoryKey = 'Shopping & Gifts';
               }
+
+              // Flexible header detection for Payer (Member)
+              const mName = (row['Πληρωτής'] || row['Μέλος'] || row['Πληρωσε'] || row['Όνομα'] || '').toString().trim();
+              const mObj = members.find(m => m.name.toLowerCase().includes(mName.toLowerCase())) || members[0];
+
+              // Flexible header detection for Beneficiary (Ποιον Αφορά) with Exact Family Name Matching
+              let ben = '';
+              for (const key of Object.keys(row)) {
+                const kLower = key.toLowerCase();
+                if (kLower.includes('αφορά') || kLower.includes('αφορα') || kLower.includes('δικαιούχος') || kLower.includes('δικαιουχος') || kLower.includes('ποιον')) {
+                  ben = String(row[key]).trim();
+                  if (ben) break;
+                }
+              }
+
+              if (!ben) ben = 'Όλη η Οικογένεια';
+              else {
+                const benLower = ben.toLowerCase();
+                if (benLower.includes('κορίτσ') || benLower.includes('κοριτσ')) {
+                  ben = 'Κορίτσια (Αγγελική & Χριστίνα 50-50)';
+                } else if (benLower.includes('νίκ') || benLower.includes('νικ')) {
+                  ben = 'Νίκος';
+                } else if (benLower.includes('ανθή') || benLower.includes('ανθη')) {
+                  ben = 'Ανθή';
+                } else if (benLower.includes('θεοδώρα') || benLower.includes('θεοδωρα')) {
+                  ben = 'Θεοδώρα';
+                } else if (benLower.includes('αγγελική') || benLower.includes('αγγελικη')) {
+                  ben = 'Αγγελική';
+                } else if (benLower.includes('χριστίνα') || benLower.includes('χριστινα')) {
+                  ben = 'Χριστίνα';
+                } else if (benLower.includes('οικογένει') || benLower.includes('οικογενει')) {
+                  ben = 'Όλη η Οικογένεια';
+                }
+              }
+
+              // Flexible header detection for Subcategory / Description
+              const subcatVal = (row['Υποκατηγορία / Περιγραφή'] || row['Υποκατηγορία'] || row['Περιγραφή'] || row['Λεπτομέρειες'] || '').toString().trim();
+
+              // Strict Day-Month-Year Date Parsing
+              let dateVal = (row['Ημερομηνία'] || row['Date'] || '').toString().trim();
+              if (dateVal) {
+                const dateParts = dateVal.split(/[\/\-\.]/);
+                if (dateParts.length === 3) {
+                  let d = dateParts[0].padStart(2, '0');
+                  let m = dateParts[1].padStart(2, '0');
+                  let y = dateParts[2].length === 2 ? `20${dateParts[2]}` : dateParts[2];
+                  // Guarantee Day-Month-Year Order
+                  dateVal = `${d}/${m}/${y.slice(-2)}`;
+                }
+              } else {
+                dateVal = getTodayFormatted();
+              }
+
+              // Flexible header detection for Payment Method
+              const payMethodVal = (row['Τρόπος Πληρωμής'] || row['Πληρωμή'] || row['Payment Method'] || 'Μετρητά').toString().trim();
+
+              const newRec = {
+                id: `rec_imp_${Date.now()}_${index}`,
+                merchant: merchantVal || (subcatVal ? subcatVal : 'Απόδειξη Excel'),
+                subcategory: subcatVal,
+                date: dateVal,
+                category: categoryKey,
+                memberId: mObj.id,
+                memberName: mObj.name,
+                beneficiary: ben,
+                total: parsedTotal,
+                paymentMethod: payMethodVal,
+                notes: 'Εισαγωγή Excel',
+                isDeleted: false,
+                updatedAt: new Date().toISOString()
+              };
+
+              newItems.push(newRec);
+            });
+
+            if (newItems.length === 0) {
+              showAlert("Δεν βρέθηκαν έγκυρες εγγραφές στο αρχείο Excel.");
+              setIsSyncing(false);
+              return;
             }
 
-            // Flexible header detection for Subcategory / Description
-            const subcatVal = (row['Υποκατηγορία / Περιγραφή'] || row['Υποκατηγορία'] || row['Περιγραφή'] || row['Λεπτομέρειες'] || '').toString().trim();
-
-            // Strict Day-Month-Year Date Parsing
-            let dateVal = (row['Ημερομηνία'] || row['Date'] || '').toString().trim();
-            if (dateVal) {
-              const dateParts = dateVal.split(/[\/\-\.]/);
-              if (dateParts.length === 3) {
-                let d = dateParts[0].padStart(2, '0');
-                let m = dateParts[1].padStart(2, '0');
-                let y = dateParts[2].length === 2 ? `20${dateParts[2]}` : dateParts[2];
-                // Guarantee Day-Month-Year Order
-                dateVal = `${d}/${m}/${y.slice(-2)}`;
+            // Batch upload to Firestore
+            if (db) {
+              const BATCH_SIZE = 400;
+              for (let i = 0; i < newItems.length; i += BATCH_SIZE) {
+                const chunk = newItems.slice(i, i + BATCH_SIZE);
+                const batch = db.batch();
+                chunk.forEach((item) => {
+                  const docRef = db.collection('receipts').doc(item.id);
+                  batch.set(docRef, item, { merge: true });
+                });
+                await batch.commit();
               }
             } else {
-              dateVal = getTodayFormatted();
+              setReceipts(prev => [...newItems, ...prev]);
             }
 
-            // Flexible header detection for Payment Method
-            const payMethodVal = (row['Τρόπος Πληρωμής'] || row['Πληρωμή'] || row['Payment Method'] || 'Μετρητά').toString().trim();
-
-            const newRec = {
-              id: `rec_imp_${Date.now()}_${index}`,
-              merchant: merchantVal || (subcatVal ? subcatVal : 'Απόδειξη Excel'),
-              subcategory: subcatVal,
-              date: dateVal,
-              category: categoryKey,
-              memberId: mObj.id,
-              memberName: mObj.name,
-              beneficiary: ben,
-              total: parsedTotal,
-              paymentMethod: payMethodVal,
-              notes: 'Εισαγωγή Excel'
-            };
-
-            saveReceipt(newRec);
-            importedCount++;
-          });
-
-          showAlert(`Εισήχθησαν επιτυχώς ${importedCount} εγγραφές από το Excel!`);
+            setIsSyncing(false);
+            showAlert(`🎉 Επιτυχία! ${newItems.length} αποδείξεις από το Excel αποθηκεύτηκαν μόνιμα στη βάση Cloud!`);
+          } catch (err) {
+            console.error("Excel import error:", err);
+            setIsSyncing(false);
+            showAlert("Σφάλμα κατά την ανάγνωση του Excel: " + err.message);
+          }
+          if (excelImportRef.current) excelImportRef.current.value = '';
         };
         reader.readAsBinaryString(file);
       };
@@ -438,7 +612,7 @@
         if (!XLSX) return;
 
         const wb = XLSX.utils.book_new();
-        const receiptRows = receipts.map((r) => ({
+        const receiptRows = activeReceipts.map((r) => ({
           'ID': r.id,
           'Ημερομηνία': r.date,
           'Κατάστημα / Παραλήπτης': r.merchant,
@@ -591,13 +765,13 @@
       };
 
       const deleteReceipt = (id) => {
-        showConfirm('Θέλετε σίγουρα να ακυρώσετε/διαγράψετε αυτή την εγγραφή;', () => {
-          removeReceipt(id);
+        showConfirm('Θέλετε να μεταφέρετε αυτή την εγγραφή στον Κάδο Ανακύκλωσης; (Μπορείτε να την επαναφέρετε ανά πάσα στιγμή)', () => {
+          softDeleteReceipt(id);
           if (editingReceipt?.id === id) setEditingReceipt(null);
         });
       };
 
-      const grandTotal = useMemo(() => receipts.reduce((acc, r) => acc + r.total, 0), [receipts]);
+      const grandTotal = useMemo(() => activeReceipts.reduce((acc, r) => acc + r.total, 0), [activeReceipts]);
 
       const mtdStats = useMemo(() => {
         const today = new Date();
@@ -605,7 +779,7 @@
         const currentYear = today.getFullYear();
         const dayOfMonth = today.getDate();
 
-        const mtdReceipts = receipts.filter(r => {
+        const mtdReceipts = activeReceipts.filter(r => {
           if (!r.date) return true;
           const parts = r.date.split(/[\/\-]/);
           if (parts.length === 3) {
@@ -626,13 +800,13 @@
           dailyAverage,
           lastUpdated: today.toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' })
         };
-      }, [receipts]);
+      }, [activeReceipts]);
 
       const beneficiaryBreakdown = useMemo(() => {
         const counts = {};
         BENEFICIARY_OPTIONS.forEach(b => counts[b] = 0);
 
-        receipts.forEach(r => {
+        activeReceipts.forEach(r => {
           const ben = r.beneficiary || 'Όλη η Οικογένεια';
           if (counts[ben] !== undefined) {
             counts[ben] += r.total;
@@ -646,14 +820,14 @@
           total: counts[b] || 0,
           percent: grandTotal > 0 ? ((counts[b] || 0) / grandTotal) * 100 : 0
         }));
-      }, [receipts, grandTotal]);
+      }, [activeReceipts, grandTotal]);
 
       const memberBreakdown = useMemo(() => {
         return members.map((m) => {
-          const mRecs = receipts.filter((r) => r.memberId === m.id);
+          const mRecs = activeReceipts.filter((r) => r.memberId === m.id);
           const payerSum = mRecs.reduce((acc, r) => acc + r.total, 0);
 
-          const beneficiarySum = receipts.reduce((acc, r) => {
+          const beneficiarySum = activeReceipts.reduce((acc, r) => {
             const ben = r.beneficiary || 'Όλη η Οικογένεια';
             if (ben === m.name) {
               return acc + r.total;
@@ -666,19 +840,19 @@
           const percent = grandTotal > 0 ? (payerSum / grandTotal) * 100 : 0;
           return { ...m, count: mRecs.length, total: payerSum, beneficiarySum, percent };
         });
-      }, [receipts, members, grandTotal]);
+      }, [activeReceipts, members, grandTotal]);
 
       const categoryBreakdown = useMemo(() => {
         return CATEGORIES.map((cat) => {
-          const catRecs = receipts.filter((r) => r.category === cat.id);
+          const catRecs = activeReceipts.filter((r) => r.category === cat.id);
           const sum = catRecs.reduce((acc, r) => acc + r.total, 0);
           const percent = grandTotal > 0 ? (sum / grandTotal) * 100 : 0;
           return { ...cat, count: catRecs.length, total: sum, percent };
         });
-      }, [receipts, grandTotal]);
+      }, [activeReceipts, grandTotal]);
 
       const filteredReceipts = useMemo(() => {
-        const filtered = receipts.filter((r) => {
+        const filtered = activeReceipts.filter((r) => {
           const ben = r.beneficiary || 'Όλη η Οικογένεια';
           const matchesSearch = r.merchant.toLowerCase().includes(searchTerm.toLowerCase()) || 
                                 (r.subcategory && r.subcategory.toLowerCase().includes(searchTerm.toLowerCase())) ||
@@ -725,11 +899,11 @@
           if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
           return 0;
         });
-      }, [receipts, searchTerm, categoryFilter, memberFilter, beneficiaryFilter, sortField, sortDirection]);
+      }, [activeReceipts, searchTerm, categoryFilter, memberFilter, beneficiaryFilter, sortField, sortDirection]);
 
       const uncategorizedReceipts = useMemo(() => {
-        return receipts.filter(r => r.category === 'Uncategorized');
-      }, [receipts]);
+        return activeReceipts.filter(r => r.category === 'Uncategorized');
+      }, [activeReceipts]);
 
       return (
         <div className="min-h-screen pb-16">
@@ -744,37 +918,51 @@
                   <div className="flex items-center gap-2">
                     <h1 className="text-xl font-black text-indigo-600">Family Receipt Manager</h1>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                      🛡️ Auto Data Safe
+                      🛡️ Cloud Protected
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">Οικογένεια: Νίκος, Ανθή, Θεοδώρα, Αγγελική, Χριστίνα</p>
                 </div>
               </div>
 
-              <div className="flex items-center space-x-2 w-full sm:w-auto flex-wrap gap-y-2">
+              {/* Cloud Live Status & Nav Tabs */}
+              <div className="flex items-center space-x-2 w-full sm:w-auto flex-wrap gap-y-2 justify-end">
+                {/* Cloud Connection Badge */}
+                <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition ${isCloudConnected ? 'bg-emerald-50 text-emerald-800 border-emerald-300' : 'bg-amber-50 text-amber-800 border-amber-300'}`} title="Google Cloud Firestore Live Status">
+                  <span className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-amber-500 animate-ping' : (isCloudConnected ? 'bg-emerald-500' : 'bg-amber-500')}`}></span>
+                  <span>{isSyncing ? 'Συγχρονισμός...' : (isCloudConnected ? 'Live Cloud 🟢' : 'Σύνδεση...')}</span>
+                </div>
+
                 <button
                   onClick={() => setActiveTab('dashboard')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'dashboard' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'dashboard' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
                   📊 Dashboard
                 </button>
                 <button
                   onClick={() => setActiveTab('receipts')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'receipts' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'receipts' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
-                  🧾 Λίστα ({receipts.length})
+                  🧾 Λίστα ({activeReceipts.length})
                 </button>
-                <button onClick={exportBackupJSON} className="px-3 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold shadow-md transition" title="Κατέβασμα αντιγράφου ασφαλείας">
+                <button
+                  onClick={() => setActiveTab('trash')}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'trash' ? 'bg-amber-600 text-white shadow-md' : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'}`}
+                  title="Κάδος Ανακύκλωσης (Διαγραμμένες Αποδείξεις)"
+                >
+                  🗑️ Κάδος ({deletedReceipts.length})
+                </button>
+                <button onClick={() => excelImportRef.current?.click()} className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md transition flex items-center gap-1" title="Εισαγωγή αρχείου Excel στη βάση Cloud">
+                  <span>📥</span> <span>Excel</span>
+                </button>
+                <button onClick={exportToExcel} className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-200 transition" title="Εξαγωγή σε Excel">
+                  📊 Εξαγωγή
+                </button>
+                <button onClick={exportBackupJSON} className="px-2.5 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold transition" title="Κατέβασμα αντιγράφου ασφαλείας">
                   💾 Backup
                 </button>
-                <button onClick={() => restoreJsonRef.current?.click()} className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md transition" title="Επαναφορά από αντίγραφο">
-                  📤 Restore
-                </button>
-                <button onClick={exportToExcel} className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md transition">
-                  📥 Excel
-                </button>
-                <button onClick={() => setShowDeleteModal(true)} className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-md transition" title="Διαγραφή παλιών δεδομένων">
-                  🗑️ Εκκαθάριση
+                <button onClick={() => setShowDeleteModal(true)} className="px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition" title="Διαχείριση παλιών δεδομένων">
+                  ⚙️ Εκκαθάριση
                 </button>
               </div>
             </div>
@@ -949,7 +1137,7 @@
                 <div>
                   <span className="text-[11px] font-semibold text-indigo-200 uppercase tracking-wider block">Συνολικά Έξοδα</span>
                   <h3 className="text-3xl font-black mt-0.5">€{grandTotal.toFixed(2)}</h3>
-                  <span className="text-[11px] text-indigo-200 mt-1 block">{receipts.length} Καταχωρημένες Εγγραφές</span>
+                  <span className="text-[11px] text-indigo-200 mt-1 block">{activeReceipts.length} Καταχωρημένες Εγγραφές</span>
                 </div>
                 <div className="text-3xl p-3 bg-white/10 rounded-2xl">💳</div>
               </div>
@@ -981,7 +1169,7 @@
             </section>
 
             {/* TAB CONTENT */}
-            {activeTab === 'dashboard' ? (
+            {activeTab === 'dashboard' && (
               <div className="space-y-6">
 
                 {/* 1. ALL CATEGORIES GRID (NO SCROLL, ALL VISIBLE WITH PERCENTAGES) */}
@@ -1086,7 +1274,9 @@
                   </section>
                 </div>
               </div>
-            ) : (
+            )}
+
+            {activeTab === 'receipts' && (
               /* RECEIPTS LIST TAB WITH FULL SORTING AND FILTERS */
               <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden space-y-4 p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
@@ -1217,6 +1407,117 @@
                     </tbody>
                   </table>
                 </div>
+              </section>
+            )}
+
+            {/* TRASH TAB - SOFT DELETED ITEMS FOR ACCIDENTAL PROTECTION */}
+            {activeTab === 'trash' && (
+              <section className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-4 gap-3">
+                  <div>
+                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                      <span>🗑️</span>
+                      <span>Κάδος Ανακύκλωσης ({deletedReceipts.length} διαγραμμένες)</span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Προστασία από λάθος: Οι αποδείξεις μένουν εδώ με ασφάλεια. Μπορείτε να τις επαναφέρετε ανά πάσα στιγμή.
+                    </p>
+                  </div>
+                  {deletedReceipts.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          showConfirm(`Θέλετε να επαναφέρετε όλες τις ${deletedReceipts.length} αποδείξεις;`, async () => {
+                            if (db) {
+                              const batch = db.batch();
+                              deletedReceipts.forEach(r => {
+                                batch.set(db.collection('receipts').doc(r.id), { isDeleted: false, deletedAt: null }, { merge: true });
+                              });
+                              await batch.commit();
+                            } else {
+                              setReceipts(prev => prev.map(r => ({ ...r, isDeleted: false })));
+                            }
+                            showAlert("Όλες οι αποδείξεις επανήλθαν επιτυχώς!");
+                          });
+                        }}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition shadow-sm"
+                      >
+                        ♻️ Επαναφορά Όλων
+                      </button>
+                      <button
+                        onClick={() => {
+                          showConfirm(`ΠΡΟΣΟΧΗ: Θέλετε να αδειάσετε οριστικά τον κάδο; Οι ${deletedReceipts.length} αποδείξεις θα διαγραφούν ΑΝΕΠΙΣΤΡΕΠΤΙ.`, async () => {
+                            if (db) {
+                              const batch = db.batch();
+                              deletedReceipts.forEach(r => {
+                                batch.delete(db.collection('receipts').doc(r.id));
+                              });
+                              await batch.commit();
+                            } else {
+                              setReceipts(prev => prev.filter(r => !r.isDeleted));
+                            }
+                            showAlert("Ο κάδος αδειάστηκε οριστικά.");
+                          });
+                        }}
+                        className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition shadow-sm"
+                      >
+                        ❌ Οριστικό Άδειασμα
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {deletedReceipts.length === 0 ? (
+                  <div className="py-12 text-center text-slate-400">
+                    <p className="text-4xl mb-2">🌿</p>
+                    <p className="font-bold text-sm text-slate-600">Ο κάδος είναι άδειος!</p>
+                    <p className="text-xs">Δεν υπάρχει καμία διαγραμμένη απόδειξη.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-slate-50 text-slate-500 text-[11px] uppercase font-bold border-b border-slate-100">
+                          <th className="py-3 px-4">Ημερομηνία</th>
+                          <th className="py-3 px-4">Κατάστημα</th>
+                          <th className="py-3 px-4">Κατηγορία</th>
+                          <th className="py-3 px-4">Πληρωτής</th>
+                          <th className="py-3 px-4">Ποιον Αφορά</th>
+                          <th className="py-3 px-4 text-right">Ποσό (€)</th>
+                          <th className="py-3 px-4 text-center">Ενέργειες</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {deletedReceipts.map((r) => (
+                          <tr key={r.id} className="hover:bg-slate-50 opacity-75 hover:opacity-100 transition">
+                            <td className="py-3 px-4 font-mono text-xs text-slate-500 line-through">{r.date}</td>
+                            <td className="py-3 px-4 font-bold text-slate-800">{r.merchant}</td>
+                            <td className="py-3 px-4 text-xs text-slate-600">{r.category}</td>
+                            <td className="py-3 px-4 text-xs">{r.memberName}</td>
+                            <td className="py-3 px-4 text-xs">{r.beneficiary || 'Όλη η Οικογένεια'}</td>
+                            <td className="py-3 px-4 text-right font-black text-slate-900">€{r.total.toFixed(2)}</td>
+                            <td className="py-3 px-4 text-center space-x-2">
+                              <button
+                                onClick={() => restoreReceiptFromTrash(r.id)}
+                                className="px-2.5 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-xs font-bold rounded-lg transition"
+                                title="Επαναφορά στη λίστα"
+                              >
+                                ♻️ Επαναφορά
+                              </button>
+                              <button
+                                onClick={() => permanentDeleteReceipt(r.id)}
+                                className="px-2.5 py-1 bg-red-100 hover:bg-red-200 text-red-700 text-xs font-bold rounded-lg transition"
+                                title="Οριστική Διαγραφή"
+                              >
+                                ❌ Οριστική
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </section>
             )}
 
@@ -1507,19 +1808,32 @@
                             return;
                           }
 
-                          const remaining = receipts.filter(r => parseDateForSort(r.date) >= limitTimestamp);
-                          const deletedCount = receipts.length - remaining.length;
+                          const toDelete = activeReceipts.filter(r => parseDateForSort(r.date) < limitTimestamp);
+                          const deletedCount = toDelete.length;
 
-                          showConfirm(`Θέλετε να διαγράψετε ${deletedCount} εγγραφές παλαιότερες από ${deleteDateLimit};`, () => {
-                            setReceipts(remaining);
+                          if (deletedCount === 0) {
+                            showAlert(`Δεν βρέθηκαν εγγραφές παλαιότερες από ${deleteDateLimit}.`);
+                            return;
+                          }
+
+                          showConfirm(`Θέλετε να μεταφέρετε ${deletedCount} παλιές εγγραφές στον Κάδο Ανακύκλωσης;`, async () => {
+                            if (db) {
+                              const batch = db.batch();
+                              toDelete.forEach(r => {
+                                batch.set(db.collection('receipts').doc(r.id), { isDeleted: true, deletedAt: new Date().toISOString() }, { merge: true });
+                              });
+                              await batch.commit();
+                            } else {
+                              setReceipts(prev => prev.map(r => parseDateForSort(r.date) < limitTimestamp ? { ...r, isDeleted: true } : r));
+                            }
                             setShowDeleteModal(false);
                             setDeleteDateLimit('');
-                            showAlert(`Διαγράφηκαν ${deletedCount} παλιές εγγραφές.`);
+                            showAlert(`Μεταφέρθηκαν ${deletedCount} παλιές εγγραφές στον Κάδο.`);
                           });
                         }}
                         className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl transition"
                       >
-                        🗑️ Διαγραφή Παλαιότερων
+                        🗑️ Μεταφορά Παλαιότερων στον Κάδο
                       </button>
                     </div>
                   </div>
@@ -1527,14 +1841,27 @@
                   <div className="pt-2 border-t flex flex-col gap-2">
                     <button
                       onClick={() => {
-                        showConfirm('ΠΡΟΣΟΧΗ! Θέλετε να διαγράψετε ΟΛΕΣ τις καταχωρημένες αποδείξεις;', () => {
-                          setReceipts([]);
+                        showConfirm('ΠΡΟΣΟΧΗ: Θέλετε να μεταφέρετε ΟΛΕΣ τις καταχωρημένες αποδείξεις στον Κάδο Ανακύκλωσης; (Μπορείτε να τις επαναφέρετε ανά πάσα στιγμή)', async () => {
+                          if (db) {
+                            const BATCH_SIZE = 400;
+                            for (let i = 0; i < activeReceipts.length; i += BATCH_SIZE) {
+                              const chunk = activeReceipts.slice(i, i + BATCH_SIZE);
+                              const batch = db.batch();
+                              chunk.forEach(r => {
+                                batch.set(db.collection('receipts').doc(r.id), { isDeleted: true, deletedAt: new Date().toISOString() }, { merge: true });
+                              });
+                              await batch.commit();
+                            }
+                          } else {
+                            setReceipts(prev => prev.map(r => ({ ...r, isDeleted: true })));
+                          }
                           setShowDeleteModal(false);
+                          showAlert("Όλες οι αποδείξεις μεταφέρθηκαν στον Κάδο. Μπορείτε να τις επαναφέρετε από τον Κάδο!");
                         });
                       }}
                       className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl transition"
                     >
-                      ⚠️ Πλήρης Διαγραφή Όλων των Δεδομένων
+                      ⚠️ Μεταφορά Όλων στον Κάδο
                     </button>
                     <button
                       onClick={() => setShowDeleteModal(false)}
