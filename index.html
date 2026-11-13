@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Family Receipt Manager</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -232,6 +235,23 @@
         setIsSyncing(true);
         const unsubscribe = db.collection('receipts').onSnapshot(
           (snapshot) => {
+            if (snapshot.empty) {
+              // If cloud database is empty, seed it with the initial/local data so devices sync immediately!
+              const localData = loadStoredReceiptsWithMigration(INITIAL_RECEIPTS);
+              if (localData && localData.length > 0) {
+                console.log("Cloud empty: auto-syncing initial data to Firestore...");
+                const batch = db.batch();
+                localData.forEach(item => {
+                  const id = item.id || `rec_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                  batch.set(db.collection('receipts').doc(id), { ...item, id, isDeleted: item.isDeleted || false }, { merge: true });
+                });
+                batch.commit().catch(e => console.error("Auto-seed error:", e));
+              }
+              setIsCloudConnected(true);
+              setIsSyncing(false);
+              return;
+            }
+
             const items = [];
             snapshot.forEach((doc) => {
               items.push({ id: doc.id, ...doc.data() });
@@ -248,6 +268,10 @@
           (error) => {
             console.error("Firestore real-time sync error:", error);
             setIsSyncing(false);
+            setIsCloudConnected(false);
+            if (error.code === 'permission-denied') {
+              showAlert("⚠️ Πρόβλημα δικαιωμάτων Firebase (Permission Denied). Παρακαλώ ελέγξτε ότι οι κανόνες (Rules) στο Firestore είναι σε Test Mode (allow read, write: if true;).");
+            }
           }
         );
 
