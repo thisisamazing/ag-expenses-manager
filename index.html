@@ -19,6 +19,10 @@
   <!-- Firebase App & Firestore Compat SDKs -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <!-- Chart.js for Pie & Bar Dashboards -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- Tesseract.js for Real OCR Receipt Photo Scanning -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-900 font-sans">
   <div id="root"></div>
@@ -96,20 +100,189 @@
       const today = new Date();
       const dd = String(today.getDate()).padStart(2, '0');
       const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const yy = String(today.getFullYear()).slice(-2);
-      return `${dd}/${mm}/${yy}`;
+      const yyyy = today.getFullYear();
+      return `${dd}/${mm}/${yyyy}`;
+    };
+
+    const getNowDateTimeFormatted = () => {
+      const today = new Date();
+      const dd = String(today.getDate()).padStart(2, '0');
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const yyyy = today.getFullYear();
+      const hh = String(today.getHours()).padStart(2, '0');
+      const min = String(today.getMinutes()).padStart(2, '0');
+      return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+    };
+
+    // Smart Date Parser supporting DD/MM/YYYY, MM/DD/YYYY, Excel serial numbers, and JS Dates
+    const parseSmartDate = (raw, preferredFormat = 'auto') => {
+      if (!raw) return { dateStr: getTodayFormatted(), timestamp: Date.now(), year: new Date().getFullYear(), month: new Date().getMonth() + 1, day: new Date().getDate() };
+
+      // 1. If it's already a Date object
+      if (raw instanceof Date && !isNaN(raw.getTime())) {
+        const d = String(raw.getDate()).padStart(2, '0');
+        const m = String(raw.getMonth() + 1).padStart(2, '0');
+        const y = raw.getFullYear();
+        return { dateStr: `${d}/${m}/${y}`, timestamp: raw.getTime(), year: y, month: raw.getMonth() + 1, day: raw.getDate() };
+      }
+
+      // 2. If it's an Excel numeric serial number (e.g. 45620)
+      if (typeof raw === 'number' || (!isNaN(raw) && String(raw).trim().length >= 4 && !String(raw).includes('/') && !String(raw).includes('-') && !String(raw).includes('.'))) {
+        const num = parseFloat(raw);
+        if (num > 20000 && num < 60000) {
+          const date = new Date(Math.round((num - 25569) * 86400 * 1000));
+          if (!isNaN(date.getTime())) {
+            const d = String(date.getDate()).padStart(2, '0');
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const y = date.getFullYear();
+            return { dateStr: `${d}/${m}/${y}`, timestamp: date.getTime(), year: y, month: date.getMonth() + 1, day: date.getDate() };
+          }
+        }
+      }
+
+      // 3. String date parsing
+      const str = String(raw).trim();
+      const parts = str.split(/[\/\-\.]/);
+      if (parts.length === 3) {
+        let p0 = parseInt(parts[0], 10);
+        let p1 = parseInt(parts[1], 10);
+        let yearPart = parts[2].trim();
+        let year = parseInt(yearPart.length === 2 ? `20${yearPart}` : yearPart, 10);
+
+        let day = p0;
+        let month = p1;
+
+        if (preferredFormat === 'mdy' || (preferredFormat === 'auto' && p0 <= 12 && p1 > 12)) {
+          // Month-Day-Year
+          month = p0;
+          day = p1;
+        } else if (p0 > 12 && p1 <= 12) {
+          // Day-Month-Year
+          day = p0;
+          month = p1;
+        } else if (preferredFormat === 'dmy') {
+          day = p0;
+          month = p1;
+        }
+
+        const validDate = new Date(year, month - 1, day);
+        const dStr = String(day).padStart(2, '0');
+        const mStr = String(month).padStart(2, '0');
+        return {
+          dateStr: `${dStr}/${mStr}/${year}`,
+          timestamp: validDate.getTime(),
+          year,
+          month,
+          day
+        };
+      }
+
+      return { dateStr: getTodayFormatted(), timestamp: Date.now(), year: new Date().getFullYear(), month: new Date().getMonth() + 1, day: new Date().getDate() };
     };
 
     const parseDateForSort = (dateStr) => {
-      if (!dateStr) return 0;
-      const parts = dateStr.split(/[\/\-]/);
-      if (parts.length === 3) {
-        let day = parseInt(parts[0], 10);
-        let month = parseInt(parts[1], 10) - 1;
-        let year = parseInt(parts[2].length === 2 ? `20${parts[2]}` : parts[2], 10);
-        return new Date(year, month, day).getTime();
+      const parsed = parseSmartDate(dateStr);
+      return parsed.timestamp || 0;
+    };
+
+    // Intelligent Receipt Text Analyzer for OCR Results
+    const parseReceiptOCRText = (text) => {
+      const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      let detectedMerchant = '';
+      let detectedTotal = 0;
+      let detectedCategory = 'Supermarket';
+      let detectedSubcategory = '';
+      let detectedDate = getTodayFormatted();
+
+      const KNOWN_STORES = [
+        { name: 'Σκλαβενίτης', match: ['σκλαβενιτ', 'sklav', 'hypermarket'], category: 'Supermarket' },
+        { name: 'ΑΒ Βασιλόπουλος', match: ['βασιλοπουλ', 'vassilop', 'αβ '], category: 'Supermarket' },
+        { name: 'Lidl Hellas', match: ['lidl', 'λιντλ'], category: 'Supermarket' },
+        { name: 'My Market', match: ['my market', 'mymarket', 'μαι μαρκετ'], category: 'Supermarket' },
+        { name: 'Γαλαξίας', match: ['γαλαξια', 'galaxias'], category: 'Supermarket' },
+        { name: 'Μασούτης', match: ['μασουτ', 'masout'], category: 'Supermarket' },
+        { name: 'EKO Gas', match: ['eko', 'εκο'], category: 'Fuel & Transport' },
+        { name: 'Shell Gas Station', match: ['shell', 'σελλ', 'coral'], category: 'Fuel & Transport' },
+        { name: 'BP Gas', match: ['bp ', 'βπ'], category: 'Fuel & Transport' },
+        { name: 'Avin Gas', match: ['avin', 'αβιν'], category: 'Fuel & Transport' },
+        { name: 'Jumbo', match: ['jumbo', 'τζαμπο'], category: 'Shopping & Gifts' },
+        { name: 'Zara', match: ['zara', 'ζαρα'], category: 'Shopping & Gifts' },
+        { name: 'H&M', match: ['h&m', 'hennes'], category: 'Shopping & Gifts' },
+        { name: 'Public', match: ['public', 'παμπλικ'], category: 'Education & Hobbies' },
+        { name: 'Coffee Island', match: ['coffee island', 'καφε'], category: 'Dining & Coffee' },
+        { name: 'Everest', match: ['everest', 'εβερεστ'], category: 'Dining & Coffee' },
+        { name: 'Γρηγόρης', match: ['γρηγορη', 'grigoris'], category: 'Dining & Coffee' },
+        { name: 'Φαρμακείο', match: ['φαρμακ', 'pharmacy', 'αποστολοπ'], category: 'Health & Pharmacy' }
+      ];
+
+      const textLower = text.toLowerCase();
+
+      for (const store of KNOWN_STORES) {
+        if (store.match.some(m => textLower.includes(m))) {
+          detectedMerchant = store.name;
+          detectedCategory = store.category;
+          break;
+        }
       }
-      return 0;
+
+      if (!detectedMerchant) {
+        for (let i = 0; i < Math.min(5, lines.length); i++) {
+          const cleanLine = lines[i].replace(/[^a-zA-Zα-ωΑ-Ω0-9\s]/g, '').trim();
+          if (cleanLine.length >= 3 && !/^\d+$/.test(cleanLine)) {
+            detectedMerchant = lines[i].slice(0, 35);
+            break;
+          }
+        }
+      }
+      if (!detectedMerchant) detectedMerchant = 'Απόδειξη (Σαρωμένη)';
+
+      const dateMatch = text.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
+      if (dateMatch) {
+        detectedDate = parseSmartDate(dateMatch[0]).dateStr;
+      }
+
+      const amountRegex = /(?:συνολο|total|πληρωτεο|καθαρο|ευρω|eur|€)\s*[:=]?\s*([0-9]+[.,][0-9]{2})/gi;
+      let match;
+      let foundTotals = [];
+      while ((match = amountRegex.exec(text)) !== null) {
+        const val = parseFloat(match[1].replace(',', '.'));
+        if (!isNaN(val) && val > 0 && val < 5000) {
+          foundTotals.push(val);
+        }
+      }
+
+      if (foundTotals.length > 0) {
+        detectedTotal = Math.max(...foundTotals);
+      } else {
+        const generalPriceMatches = text.match(/\b([0-9]{1,4}[.,][0-9]{2})\b/g);
+        if (generalPriceMatches) {
+          const nums = generalPriceMatches.map(p => parseFloat(p.replace(',', '.'))).filter(n => n > 0 && n < 2000);
+          if (nums.length > 0) detectedTotal = Math.max(...nums);
+        }
+      }
+
+      const itemLines = [];
+      for (const line of lines) {
+        if (line.length > 3 && !line.toLowerCase().includes('αφμ') && !line.toLowerCase().includes('τηλ') && !line.toLowerCase().includes('ευχαριστ') && !line.toLowerCase().includes('συνολο') && !line.toLowerCase().includes('αποδειξη')) {
+          if (/[a-zA-Zα-ωΑ-Ω]/.test(line)) {
+            itemLines.push(line.replace(/[0-9]+[.,][0-9]{2}/g, '').trim());
+          }
+        }
+      }
+      if (itemLines.length > 1) {
+        detectedSubcategory = itemLines.slice(1, 4).join(', ').slice(0, 60);
+      } else {
+        detectedSubcategory = 'Είδη / Προϊόντα Αγοράς';
+      }
+
+      return {
+        merchant: detectedMerchant,
+        category: detectedCategory,
+        subcategory: detectedSubcategory,
+        total: detectedTotal > 0 ? detectedTotal.toFixed(2) : '',
+        date: detectedDate,
+        rawText: text
+      };
     };
 
     const DEFAULT_MEMBERS = [
@@ -161,6 +334,88 @@
       { id: 'rec_4', merchant: 'Ενοίκιο Σπιτιού', subcategory: 'Μηνιαίο Ενοίκιο', date: '04/11/26', category: 'Rent', memberId: 'nikos', memberName: 'Νίκος', beneficiary: 'Όλη η Οικογένεια', total: 450.00, paymentMethod: 'Direct Order / Πάγια', notes: '' }
     ];
 
+    const DEFAULT_BUDGET_CONFIG = {
+      monthlyTarget: 2500,
+      fixedExpenses: [
+        { id: 'fix_1', category: 'Rent', title: 'Ενοίκιο Σπιτιού', amount: 450, beneficiary: 'Όλη η Οικογένεια' },
+        { id: 'fix_2', category: 'Utilities & Bills', title: 'ΔΕΗ / Ρεύμα & Ύδρευση', amount: 200, beneficiary: 'Όλη η Οικογένεια' },
+        { id: 'fix_3', category: 'Education & Hobbies', title: 'Φροντιστήρια & Αγγλικά', amount: 220, beneficiary: 'Θεοδώρα' },
+        { id: 'fix_4', category: 'Loans & Tax', title: 'Δάνεια & Εφορία', amount: 250, beneficiary: 'Όλη η Οικογένεια' }
+      ]
+    };
+
+    const DEFAULT_WIDGETS = {
+      weeklyAllowance: true,
+      categoryPie: true,
+      beneficiaryPie: true,
+      budgetVsActual: true,
+      weeklyTrend: true,
+      memberStats: true,
+      categoryGrid: true,
+      quickActions: true
+    };
+
+    function DynamicChart({ type, data, options, height = 260 }) {
+      const canvasRef = useRef(null);
+      const chartInstanceRef = useRef(null);
+
+      useEffect(() => {
+        if (!canvasRef.current || !window.Chart) return;
+        if (chartInstanceRef.current) {
+          chartInstanceRef.current.destroy();
+        }
+
+        try {
+          chartInstanceRef.current = new window.Chart(canvasRef.current, {
+            type,
+            data,
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  position: 'bottom',
+                  labels: {
+                    boxWidth: 12,
+                    font: { size: 11, family: 'sans-serif' },
+                    padding: 10
+                  }
+                },
+                tooltip: {
+                  callbacks: {
+                    label: function(context) {
+                      let label = context.dataset?.label || context.label || '';
+                      if (label) label += ': ';
+                      const val = context.parsed?.y !== undefined ? context.parsed.y : context.parsed;
+                      if (typeof val === 'number') {
+                        label += '€' + val.toFixed(2);
+                      }
+                      return label;
+                    }
+                  }
+                }
+              },
+              ...options
+            }
+          });
+        } catch (err) {
+          console.error("Chart render error:", err);
+        }
+
+        return () => {
+          if (chartInstanceRef.current) {
+            chartInstanceRef.current.destroy();
+          }
+        };
+      }, [type, data, options]);
+
+      return (
+        <div style={{ position: 'relative', height: `${height}px`, width: '100%' }}>
+          <canvas ref={canvasRef}></canvas>
+        </div>
+      );
+    }
+
     function App() {
       const [receipts, setReceipts] = useState(() => {
         return loadStoredReceiptsWithMigration(INITIAL_RECEIPTS);
@@ -177,19 +432,61 @@
       const [categoryFilter, setCategoryFilter] = useState('All');
       const [memberFilter, setMemberFilter] = useState('All');
       const [beneficiaryFilter, setBeneficiaryFilter] = useState('All');
+      const [selectedMonth, setSelectedMonth] = useState('ALL');
+      const [excelDateFormat, setExcelDateFormat] = useState('auto');
       const [isListening, setIsListening] = useState(false);
+
+      // OCR Processing State
+      const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+      const [ocrProgress, setOcrProgress] = useState(0);
+      const [ocrMessage, setOcrMessage] = useState('');
+
+      // Budget & Fixed Expenses Configuration
+      const [budgetConfig, setBudgetConfig] = useState(DEFAULT_BUDGET_CONFIG);
+
+      // Dashboard Widgets Visibility (Persisted in localStorage)
+      const [widgets, setWidgets] = useState(() => {
+        try {
+          const s = localStorage.getItem('family_dashboard_widgets_v1');
+          return s ? JSON.parse(s) : DEFAULT_WIDGETS;
+        } catch (e) {
+          return DEFAULT_WIDGETS;
+        }
+      });
+
+      const toggleWidget = (key) => {
+        setWidgets(prev => {
+          const next = { ...prev, [key]: !prev[key] };
+          try {
+            localStorage.setItem('family_dashboard_widgets_v1', JSON.stringify(next));
+          } catch (e) {}
+          return next;
+        });
+      };
 
       // State to Toggle Uncategorized Box Visibility
       const [showUncategorizedBox, setShowUncategorizedBox] = useState(true);
 
       const [sortField, setSortField] = useState('date');
-      const [sortDirection, setSortDirection] = useState('asc');
+      const [sortDirection, setSortDirection] = useState('desc');
 
       const [editingReceipt, setEditingReceipt] = useState(null);
 
       const [showFormModal, setShowFormModal] = useState(false);
+      const [showBudgetModal, setShowBudgetModal] = useState(false);
+      const [showCustomizeModal, setShowCustomizeModal] = useState(false);
+      const [showExcelImportModal, setShowExcelImportModal] = useState(false);
+
+      // Fixed Expense Input Fields for Budget Manager
+      const [newFixedTitle, setNewFixedTitle] = useState('');
+      const [newFixedAmount, setNewFixedAmount] = useState('');
+      const [newFixedCategory, setNewFixedCategory] = useState('Utilities & Bills');
+      const [newFixedBeneficiary, setNewFixedBeneficiary] = useState('Όλη η Οικογένεια');
+      const [tempMonthlyTarget, setTempMonthlyTarget] = useState(2500);
+
       const [formData, setFormData] = useState({
         date: getTodayFormatted(),
+        registrationDate: getNowDateTimeFormatted(),
         merchant: '',
         subcategory: '',
         category: 'Supermarket',
@@ -203,6 +500,7 @@
       const cameraInputRef = useRef(null);
       const fileInputRef = useRef(null);
       const excelImportRef = useRef(null);
+      const budgetExcelImportRef = useRef(null);
       const restoreJsonRef = useRef(null);
 
       // State for Date Deletion Modal
@@ -236,7 +534,6 @@
         const unsubscribe = db.collection('receipts').onSnapshot(
           (snapshot) => {
             if (snapshot.empty) {
-              // If cloud database is empty, seed it with the initial/local data so devices sync immediately!
               const localData = loadStoredReceiptsWithMigration(INITIAL_RECEIPTS);
               if (localData && localData.length > 0) {
                 console.log("Cloud empty: auto-syncing initial data to Firestore...");
@@ -260,7 +557,6 @@
             setIsCloudConnected(true);
             setIsSyncing(false);
 
-            // Local cache mirror
             try {
               localStorage.setItem(CURRENT_STORAGE_KEY, JSON.stringify(items));
             } catch (err) {}
@@ -270,13 +566,78 @@
             setIsSyncing(false);
             setIsCloudConnected(false);
             if (error.code === 'permission-denied') {
-              showAlert("⚠️ Πρόβλημα δικαιωμάτων Firebase (Permission Denied). Παρακαλώ ελέγξτε ότι οι κανόνες (Rules) στο Firestore είναι σε Test Mode (allow read, write: if true;).");
+              showAlert("⚠️ Πρόβλημα δικαιωμάτων Firebase (Permission Denied). Παρακαλώ ελέγξτε ότι οι κανόνες (Rules) στο Firestore είναι σε Test Mode.");
             }
           }
         );
 
-        return () => unsubscribe();
+        // Real-time listener for Budget Settings
+        const unsubBudget = db.collection('settings').doc('budget').onSnapshot(
+          (doc) => {
+            if (doc.exists) {
+              const data = doc.data();
+              if (data && data.monthlyTarget) {
+                setBudgetConfig(data);
+              }
+            } else {
+              db.collection('settings').doc('budget').set(DEFAULT_BUDGET_CONFIG).catch(() => {});
+            }
+          },
+          (err) => console.warn("Budget settings sync notice:", err)
+        );
+
+        return () => {
+          unsubscribe();
+          unsubBudget();
+        };
       }, []);
+
+      const saveBudgetConfigToCloud = async (newConfig) => {
+        setBudgetConfig(newConfig);
+        if (db) {
+          try {
+            await db.collection('settings').doc('budget').set(newConfig, { merge: true });
+            showAlert("Ο Προϋπολογισμός αποθηκεύτηκε με επιτυχία στο Cloud!");
+          } catch (err) {
+            showAlert("Σφάλμα κατά την αποθήκευση του προϋπολογισμού: " + err.message);
+          }
+        }
+      };
+
+      useEffect(() => {
+        if (budgetConfig.monthlyTarget) {
+          setTempMonthlyTarget(budgetConfig.monthlyTarget);
+        }
+      }, [budgetConfig.monthlyTarget]);
+
+      const handleAddFixedExpense = (e) => {
+        e.preventDefault();
+        const amt = parseFloat(newFixedAmount);
+        if (!newFixedTitle.trim() || isNaN(amt) || amt <= 0) {
+          showAlert("Παρακαλώ συμπληρώστε τίτλο και έγκυρο ποσό (€) για το πάγιο έξοδο.");
+          return;
+        }
+        const updatedFixed = [
+          ...(budgetConfig.fixedExpenses || []),
+          {
+            id: `fix_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+            title: newFixedTitle.trim(),
+            amount: amt,
+            category: newFixedCategory,
+            beneficiary: newFixedBeneficiary
+          }
+        ];
+        saveBudgetConfigToCloud({ ...budgetConfig, fixedExpenses: updatedFixed });
+        setNewFixedTitle('');
+        setNewFixedAmount('');
+      };
+
+      const handleDeleteFixedExpense = (id) => {
+        showConfirm("Θέλετε να διαγράψετε αυτό το πάγιο έξοδο από τον προϋπολογισμό;", () => {
+          const updatedFixed = (budgetConfig.fixedExpenses || []).filter(f => f.id !== id);
+          saveBudgetConfigToCloud({ ...budgetConfig, fixedExpenses: updatedFixed });
+        });
+      };
 
       // Active vs Soft-deleted receipts
       const activeReceipts = useMemo(() => receipts.filter(r => !r.isDeleted), [receipts]);
@@ -326,12 +687,15 @@
         }
       };
 
-      // Permanent Save to Cloud Firestore
+      // Permanent Save to Cloud Firestore with Dual Dates (Receipt Date & Registration Date)
       const saveReceipt = async (newRec) => {
-        const recId = newRec.id || `rec_${Date.now()}`;
+        const recId = newRec.id || `rec_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        const parsedDate = parseSmartDate(newRec.date);
         const cleanData = {
           ...newRec,
           id: recId,
+          date: parsedDate.dateStr, // Ημερομηνία Απόδειξης
+          registrationDate: newRec.registrationDate || getNowDateTimeFormatted(), // Ημερομηνία Καταχώρησης
           isDeleted: newRec.isDeleted || false,
           updatedAt: new Date().toISOString()
         };
@@ -345,6 +709,86 @@
           }
         } else {
           setReceipts(prev => [cleanData, ...prev.filter(r => r.id !== recId)]);
+        }
+      };
+
+      // Real OCR Receipt Scanner (Tesseract.js for Greek & English)
+      const handleRealPhotoOCR = async (e) => {
+        const files = Array.from(e.target.files || []);
+        if (files.length === 0) return;
+
+        setIsOcrProcessing(true);
+        setOcrProgress(15);
+        setOcrMessage('Εκκίνηση OCR μηχανής (Tesseract)...');
+
+        try {
+          if (window.Tesseract) {
+            setOcrProgress(30);
+            setOcrMessage(`Σάρωση κειμένου (${files[0].name})...`);
+            const worker = await window.Tesseract.createWorker('ell+eng');
+            const ret = await worker.recognize(files[0]);
+            setOcrProgress(85);
+            setOcrMessage('Εξαγωγή καταστήματος, ποσού, ειδών & ημερομηνίας...');
+            await worker.terminate();
+
+            const parsed = parseReceiptOCRText(ret.data.text);
+            const firstForm = {
+              date: parsed.date,
+              registrationDate: getNowDateTimeFormatted(),
+              merchant: parsed.merchant,
+              subcategory: parsed.subcategory,
+              category: parsed.category,
+              memberId: selectedMember,
+              beneficiary: 'Όλη η Οικογένεια',
+              total: parsed.total,
+              paymentMethod: 'Card',
+              notes: `Σαρώθηκε μέσω OCR (${files[0].name})`
+            };
+
+            if (files.length > 1) {
+              const queueItems = files.slice(1).map((f, idx) => ({
+                date: getTodayFormatted(),
+                registrationDate: getNowDateTimeFormatted(),
+                merchant: f.name.split('.')[0] || `Απόδειξη ${idx + 2}`,
+                subcategory: 'Προς επιβεβαίωση',
+                category: 'Supermarket',
+                memberId: selectedMember,
+                beneficiary: 'Όλη η Οικογένεια',
+                total: '',
+                paymentMethod: 'Card',
+                notes: `Φωτογραφία: ${f.name}`
+              }));
+              setScanQueue(queueItems);
+            } else {
+              setScanQueue([]);
+            }
+
+            setFormData(firstForm);
+            setShowFormModal(true);
+          } else {
+            throw new Error("Tesseract not available");
+          }
+        } catch (err) {
+          console.warn("OCR notice:", err);
+          setFormData({
+            date: getTodayFormatted(),
+            registrationDate: getNowDateTimeFormatted(),
+            merchant: files[0].name.split('.')[0] || 'Νέα Απόδειξη',
+            subcategory: 'Αγορά προϊόντων',
+            category: 'Supermarket',
+            memberId: selectedMember,
+            beneficiary: 'Όλη η Οικογένεια',
+            total: '',
+            paymentMethod: 'Card',
+            notes: 'Χειροκίνητη συμπλήρωση από φωτογραφία'
+          });
+          setShowFormModal(true);
+        } finally {
+          setIsOcrProcessing(false);
+          setOcrProgress(0);
+          setOcrMessage('');
+          if (cameraInputRef.current) cameraInputRef.current.value = '';
+          if (fileInputRef.current) fileInputRef.current.value = '';
         }
       };
 
@@ -408,6 +852,91 @@
         }
       };
 
+      // Clean All for Re-Import (Helps user re-import cleanly with right dates)
+      const cleanAllReceiptsForReimport = () => {
+        showConfirm("ΠΡΟΣΟΧΗ: Θέλετε να διαγράψετε τις υπάρχουσες αποδείξεις από τη βάση για να ξανανεβάσετε το Excel με τις σωστές ημερομηνίες; (Θα αδειάσει η βάση)", async () => {
+          setIsSyncing(true);
+          if (db) {
+            try {
+              const BATCH_SIZE = 400;
+              for (let i = 0; i < receipts.length; i += BATCH_SIZE) {
+                const chunk = receipts.slice(i, i + BATCH_SIZE);
+                const batch = db.batch();
+                chunk.forEach(r => {
+                  batch.delete(db.collection('receipts').doc(r.id));
+                });
+                await batch.commit();
+              }
+            } catch (err) {
+              console.error(err);
+            }
+          }
+          setReceipts([]);
+          setIsSyncing(false);
+          setShowExcelImportModal(false);
+          showAlert("Η βάση καθαρίστηκε! Μπορείτε τώρα να ανεβάσετε το Excel σας με τη σωστή μορφή ημερομηνιών.");
+        });
+      };
+
+      // Fixed Expenses Budget Import from Excel
+      const handleBudgetExcelImport = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          try {
+            const XLSX = window.XLSX;
+            const bstr = evt.target.result;
+            const wb = XLSX.read(bstr, { type: 'binary' });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            const data = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' });
+
+            const importedFixed = [];
+            let targetCandidate = null;
+
+            data.forEach((row, idx) => {
+              const amountVal = parseFloat(String(row['Ποσό (€)'] || row['Ποσό'] || row['Amount'] || 0).replace(',', '.'));
+              const titleVal = String(row['Τίτλος Πάγιου'] || row['Περιγραφή'] || row['Πάγιο Έξοδο'] || row['Title'] || '').trim();
+              const catVal = String(row['Κατηγορία'] || row['Category'] || 'Utilities & Bills').trim();
+
+              if (titleVal.toLowerCase().includes('στόχος') || titleVal.toLowerCase().includes('target') || titleVal.toLowerCase().includes('προυπολογισμος')) {
+                if (amountVal > 0) targetCandidate = amountVal;
+                return;
+              }
+
+              if (amountVal > 0 && titleVal) {
+                importedFixed.push({
+                  id: `fix_imp_${Date.now()}_${idx}`,
+                  title: titleVal,
+                  amount: amountVal,
+                  category: catVal || 'Utilities & Bills',
+                  beneficiary: String(row['Ποιον Αφορά'] || 'Όλη η Οικογένεια').trim()
+                });
+              }
+            });
+
+            if (importedFixed.length === 0) {
+              showAlert("Δεν βρέθηκαν έγκυρα πάγια έξοδα στο Excel.");
+              return;
+            }
+
+            const updatedBudget = {
+              monthlyTarget: targetCandidate || budgetConfig.monthlyTarget || 2500,
+              fixedExpenses: importedFixed
+            };
+
+            await saveBudgetConfigToCloud(updatedBudget);
+            showAlert(`Εισήχθησαν ${importedFixed.length} πάγια έξοδα στον προϋπολογισμό!`);
+          } catch (err) {
+            showAlert("Σφάλμα κατά την ανάγνωση του αρχείου προϋπολογισμού: " + err.message);
+          }
+          if (budgetExcelImportRef.current) budgetExcelImportRef.current.value = '';
+        };
+        reader.readAsBinaryString(file);
+      };
+
+      // Excel Receipts Import with Smart Date Parsing & Year Preservation
       const handleExcelImport = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -424,15 +953,14 @@
             const data = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' });
 
             const newItems = [];
+            const nowReg = getNowDateTimeFormatted();
 
             data.forEach((row, index) => {
-              // Flexible header detection for amount
               const rawAmount = row['Σύνολο (€)'] || row['Σύνολο'] || row['Ποσό (€)'] || row['Ποσό'] || row['Amount'] || row['TOTAL'] || row['Τιμή'] || row['Ποσο'];
               const parsedTotal = parseFloat(String(rawAmount).replace(',', '.'));
 
               if (isNaN(parsedTotal) || parsedTotal <= 0) return;
 
-              // Flexible header detection for Merchant / Store name
               let merchantVal = '';
               for (const key of Object.keys(row)) {
                 const kLower = key.toLowerCase();
@@ -445,7 +973,6 @@
                 merchantVal = String(row['Κατάστημα / Παραλήπτης'] || row['Κατάστημα'] || row['Παραλήπτης'] || '').trim();
               }
 
-              // Flexible header detection for Category
               const rawCat = (row['Κατηγορία Εξόδου'] || row['Κατηγορία'] || row['Category'] || row['Είδος Εξόδου'] || '').toString().trim();
 
               let categoryKey = 'Uncategorized';
@@ -467,11 +994,9 @@
                 else if (catLower.includes('ψωνια') || catLower.includes('δωρα')) categoryKey = 'Shopping & Gifts';
               }
 
-              // Flexible header detection for Payer (Member)
               const mName = (row['Πληρωτής'] || row['Μέλος'] || row['Πληρωσε'] || row['Όνομα'] || '').toString().trim();
               const mObj = members.find(m => m.name.toLowerCase().includes(mName.toLowerCase())) || members[0];
 
-              // Flexible header detection for Beneficiary (Ποιον Αφορά) with Exact Family Name Matching
               let ben = '';
               for (const key of Object.keys(row)) {
                 const kLower = key.toLowerCase();
@@ -501,32 +1026,20 @@
                 }
               }
 
-              // Flexible header detection for Subcategory / Description
               const subcatVal = (row['Υποκατηγορία / Περιγραφή'] || row['Υποκατηγορία'] || row['Περιγραφή'] || row['Λεπτομέρειες'] || '').toString().trim();
 
-              // Strict Day-Month-Year Date Parsing
-              let dateVal = (row['Ημερομηνία'] || row['Date'] || '').toString().trim();
-              if (dateVal) {
-                const dateParts = dateVal.split(/[\/\-\.]/);
-                if (dateParts.length === 3) {
-                  let d = dateParts[0].padStart(2, '0');
-                  let m = dateParts[1].padStart(2, '0');
-                  let y = dateParts[2].length === 2 ? `20${dateParts[2]}` : dateParts[2];
-                  // Guarantee Day-Month-Year Order
-                  dateVal = `${d}/${m}/${y.slice(-2)}`;
-                }
-              } else {
-                dateVal = getTodayFormatted();
-              }
+              // Smart Date Parsing with Genuine Year Preservation
+              let dateRaw = row['Ημερομηνία'] || row['Date'] || row['Ημερομηνια'] || '';
+              const dateParsed = parseSmartDate(dateRaw, excelDateFormat);
 
-              // Flexible header detection for Payment Method
-              const payMethodVal = (row['Τρόπος Πληρωμής'] || row['Πληρωμή'] || row['Payment Method'] || 'Μετρητά').toString().trim();
+              const payMethodVal = (row['Τρόπος Πληρωμής'] || row['Πληρωμή'] || row['Payment Method'] || 'Card').toString().trim();
 
               const newRec = {
                 id: `rec_imp_${Date.now()}_${index}`,
                 merchant: merchantVal || (subcatVal ? subcatVal : 'Απόδειξη Excel'),
                 subcategory: subcatVal,
-                date: dateVal,
+                date: dateParsed.dateStr,           // Ημερομηνία Απόδειξης
+                registrationDate: nowReg,           // Ημερομηνία Καταχώρησης
                 category: categoryKey,
                 memberId: mObj.id,
                 memberName: mObj.name,
@@ -547,7 +1060,6 @@
               return;
             }
 
-            // Batch upload to Firestore
             if (db) {
               const BATCH_SIZE = 400;
               for (let i = 0; i < newItems.length; i += BATCH_SIZE) {
@@ -564,6 +1076,7 @@
             }
 
             setIsSyncing(false);
+            setShowExcelImportModal(false);
             showAlert(`🎉 Επιτυχία! ${newItems.length} αποδείξεις από το Excel αποθηκεύτηκαν μόνιμα στη βάση Cloud!`);
           } catch (err) {
             console.error("Excel import error:", err);
@@ -629,6 +1142,28 @@
         const ws = XLSX.utils.json_to_sheet(templateData);
         XLSX.utils.book_append_sheet(wb, ws, 'Πρότυπο Αποδείξεων');
         XLSX.writeFile(wb, 'Receipts_Template_Updated.xlsx');
+      };
+
+      const downloadBudgetTemplate = () => {
+        const XLSX = window.XLSX;
+        if (!XLSX) {
+          showAlert('Η βιβλιοθήκη Excel φορτώνει, παρακαλώ δοκιμάστε ξανά σε 2 δευτερόλεπτα.');
+          return;
+        }
+
+        const wb = XLSX.utils.book_new();
+        const templateData = [
+          { 'Τίτλος Πάγιου': 'Ενοίκιο Σπιτιού', 'Κατηγορία': 'Rent', 'Ποσό (€)': 450, 'Ποιον Αφορά': 'Όλη η Οικογένεια' },
+          { 'Τίτλος Πάγιου': 'ΔΕΗ / Ρεύμα', 'Κατηγορία': 'Utilities & Bills', 'Ποσό (€)': 200, 'Ποιον Αφορά': 'Όλη η Οικογένεια' },
+          { 'Τίτλος Πάγιου': 'Φροντιστήριο Θεοδώρας', 'Κατηγορία': 'Education & Hobbies', 'Ποσό (€)': 220, 'Ποιον Αφορά': 'Θεοδώρα' },
+          { 'Τίτλος Πάγιου': 'Δόση Δανείου / Εφορία', 'Κατηγορία': 'Loans & Tax', 'Ποσό (€)': 250, 'Ποιον Αφορά': 'Όλη η Οικογένεια' },
+          { 'Τίτλος Πάγιου': 'Cosmote Σταθερό & Internet', 'Κατηγορία': 'Utilities & Bills', 'Ποσό (€)': 45, 'Ποιον Αφορά': 'Όλη η Οικογένεια' },
+          { 'Τίτλος Πάγιου': 'Στόχος Μηνιαίων Εξόδων (Target)', 'Κατηγορία': 'Allowance', 'Ποσό (€)': 2500, 'Ποιον Αφορά': 'Όλη η Οικογένεια' }
+        ];
+
+        const ws = XLSX.utils.json_to_sheet(templateData);
+        XLSX.utils.book_append_sheet(wb, ws, 'Προϋπολογισμός Πάγιων');
+        XLSX.writeFile(wb, 'Fixed_Expenses_Budget_Template.xlsx');
       };
 
       const exportToExcel = () => {
@@ -749,29 +1284,7 @@
       };
 
       const handleFileUpload = (e) => {
-        const files = Array.from(e.target.files || []);
-        if (files.length === 0) return;
-
-        setIsScanning(true);
-        setTimeout(() => {
-          setIsScanning(false);
-          const scannedItems = files.map((f, idx) => ({
-            date: getTodayFormatted(),
-            merchant: `Απόδειξη #${idx + 1} (${f.name.split('.')[0]})`,
-            subcategory: 'Σαρωμένη Απόδειξη',
-            category: 'Uncategorized',
-            memberId: selectedMember,
-            beneficiary: 'Όλη η Οικογένεια',
-            total: (15.50 + idx * 8.20).toFixed(2),
-            paymentMethod: 'Card',
-            notes: 'Σαρώθηκε από φωτογραφία'
-          }));
-
-          const [first, ...rest] = scannedItems;
-          setScanQueue(rest);
-          setFormData(first);
-          setShowFormModal(true);
-        }, 800);
+        handleRealPhotoOCR(e);
       };
 
       const changeCategory = (receiptId, newCat) => {
@@ -795,42 +1308,84 @@
         });
       };
 
+      // Distinct Months Available for Filtering
+      const availableMonths = useMemo(() => {
+        const setM = new Set();
+        activeReceipts.forEach(r => {
+          const p = parseSmartDate(r.date);
+          if (p.year && p.month) {
+            const mm = String(p.month).padStart(2, '0');
+            setM.add(`${mm}/${p.year}`);
+          }
+        });
+        return Array.from(setM).sort().reverse();
+      }, [activeReceipts]);
+
+      // Filtered by Selected Month (or All)
+      const currentMonthReceipts = useMemo(() => {
+        if (selectedMonth === 'ALL') return activeReceipts;
+        return activeReceipts.filter(r => {
+          const p = parseSmartDate(r.date);
+          const mStr = `${String(p.month).padStart(2, '0')}/${p.year}`;
+          return mStr === selectedMonth;
+        });
+      }, [activeReceipts, selectedMonth]);
+
       const grandTotal = useMemo(() => activeReceipts.reduce((acc, r) => acc + r.total, 0), [activeReceipts]);
+      const currentMonthTotal = useMemo(() => currentMonthReceipts.reduce((acc, r) => acc + r.total, 0), [currentMonthReceipts]);
+
+      // Fixed & Variable Budget Calculations
+      const monthlyTarget = parseFloat(budgetConfig.monthlyTarget) || 2500;
+      const totalFixedBudget = useMemo(() => {
+        return (budgetConfig.fixedExpenses || []).reduce((acc, f) => acc + (parseFloat(f.amount) || 0), 0);
+      }, [budgetConfig]);
+
+      const variableBudget = Math.max(0, monthlyTarget - totalFixedBudget);
+
+      const fixedCategories = useMemo(() => {
+        return (budgetConfig.fixedExpenses || []).map(f => f.category);
+      }, [budgetConfig]);
+
+      const actualFixedSpent = useMemo(() => {
+        return currentMonthReceipts.filter(r => fixedCategories.includes(r.category)).reduce((acc, r) => acc + r.total, 0);
+      }, [currentMonthReceipts, fixedCategories]);
+
+      const actualVariableSpent = useMemo(() => {
+        return currentMonthReceipts.filter(r => !fixedCategories.includes(r.category)).reduce((acc, r) => acc + r.total, 0);
+      }, [currentMonthReceipts, fixedCategories]);
+
+      const remainingMonthlyBudget = monthlyTarget - currentMonthTotal;
+      const remainingVariableBudget = variableBudget - actualVariableSpent;
+
+      // Weekly Allowance: Divided across 4 weeks (or remaining weeks of month)
+      const todayDate = new Date();
+      const currentWeekOfMonth = Math.min(4, Math.max(1, Math.ceil(todayDate.getDate() / 7)));
+      const remainingWeeks = Math.max(1, 5 - currentWeekOfMonth);
+
+      const standardWeeklyAllowance = variableBudget / 4;
+      const currentWeekAllowance = remainingVariableBudget / remainingWeeks;
 
       const mtdStats = useMemo(() => {
         const today = new Date();
-        const currentMonth = today.getMonth();
-        const currentYear = today.getFullYear();
-        const dayOfMonth = today.getDate();
-
-        const mtdReceipts = activeReceipts.filter(r => {
-          if (!r.date) return true;
-          const parts = r.date.split(/[\/\-]/);
-          if (parts.length === 3) {
-            let year = parseInt(parts[2].length === 2 ? `20${parts[2]}` : parts[2]);
-            let month = parseInt(parts[1]) - 1;
-            return month === currentMonth && year === currentYear;
-          }
-          return true;
-        });
-
-        const totalMTD = mtdReceipts.reduce((acc, r) => acc + r.total, 0);
-        const dailyAverage = dayOfMonth > 0 ? totalMTD / dayOfMonth : totalMTD;
+        const count = currentMonthReceipts.length;
+        const total = currentMonthTotal;
+        const days = today.getDate();
+        const dailyAverage = days > 0 ? total / days : total;
 
         return {
-          total: totalMTD,
-          count: mtdReceipts.length,
-          dayOfMonth,
+          total,
+          count,
+          dayOfMonth: days,
           dailyAverage,
           lastUpdated: today.toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' })
         };
-      }, [activeReceipts]);
+      }, [currentMonthReceipts, currentMonthTotal]);
 
       const beneficiaryBreakdown = useMemo(() => {
         const counts = {};
         BENEFICIARY_OPTIONS.forEach(b => counts[b] = 0);
 
-        activeReceipts.forEach(r => {
+        currentMonthReceipts.forEach(r => {
           const ben = r.beneficiary || 'Όλη η Οικογένεια';
           if (counts[ben] !== undefined) {
             counts[ben] += r.total;
@@ -842,16 +1397,16 @@
         return BENEFICIARY_OPTIONS.map(b => ({
           name: b,
           total: counts[b] || 0,
-          percent: grandTotal > 0 ? ((counts[b] || 0) / grandTotal) * 100 : 0
+          percent: currentMonthTotal > 0 ? ((counts[b] || 0) / currentMonthTotal) * 100 : 0
         }));
-      }, [activeReceipts, grandTotal]);
+      }, [currentMonthReceipts, currentMonthTotal]);
 
       const memberBreakdown = useMemo(() => {
         return members.map((m) => {
-          const mRecs = activeReceipts.filter((r) => r.memberId === m.id);
+          const mRecs = currentMonthReceipts.filter((r) => r.memberId === m.id);
           const payerSum = mRecs.reduce((acc, r) => acc + r.total, 0);
 
-          const beneficiarySum = activeReceipts.reduce((acc, r) => {
+          const beneficiarySum = currentMonthReceipts.reduce((acc, r) => {
             const ben = r.beneficiary || 'Όλη η Οικογένεια';
             if (ben === m.name) {
               return acc + r.total;
@@ -861,19 +1416,137 @@
             return acc;
           }, 0);
 
-          const percent = grandTotal > 0 ? (payerSum / grandTotal) * 100 : 0;
+          const percent = currentMonthTotal > 0 ? (payerSum / currentMonthTotal) * 100 : 0;
           return { ...m, count: mRecs.length, total: payerSum, beneficiarySum, percent };
         });
-      }, [activeReceipts, members, grandTotal]);
+      }, [currentMonthReceipts, members, currentMonthTotal]);
 
       const categoryBreakdown = useMemo(() => {
         return CATEGORIES.map((cat) => {
-          const catRecs = activeReceipts.filter((r) => r.category === cat.id);
+          const catRecs = currentMonthReceipts.filter((r) => r.category === cat.id);
           const sum = catRecs.reduce((acc, r) => acc + r.total, 0);
-          const percent = grandTotal > 0 ? (sum / grandTotal) * 100 : 0;
+          const percent = currentMonthTotal > 0 ? (sum / currentMonthTotal) * 100 : 0;
           return { ...cat, count: catRecs.length, total: sum, percent };
         });
-      }, [activeReceipts, grandTotal]);
+      }, [currentMonthReceipts, currentMonthTotal]);
+
+      // Category Pie Chart Dataset
+      const categoryPieData = useMemo(() => {
+        const palette = [
+          '#10b981', '#f59e0b', '#f43f5e', '#14b8a6', '#8b5cf6',
+          '#6366f1', '#22c55e', '#3b82f6', '#ef4444', '#ec4899', '#78716c', '#f97316'
+        ];
+        const activeItems = categoryBreakdown.filter(c => c.total > 0);
+        if (activeItems.length === 0) {
+          return {
+            labels: ['Χωρίς Έξοδα'],
+            datasets: [{ data: [1], backgroundColor: ['#e2e8f0'] }]
+          };
+        }
+        return {
+          labels: activeItems.map(c => c.label.split('/')[0]),
+          datasets: [{
+            data: activeItems.map(c => c.total),
+            backgroundColor: palette.slice(0, activeItems.length),
+            borderWidth: 2,
+            borderColor: '#ffffff'
+          }]
+        };
+      }, [categoryBreakdown]);
+
+      // Beneficiary Pie Chart Dataset
+      const beneficiaryPieData = useMemo(() => {
+        const palette = ['#6366f1', '#ec4899', '#3b82f6', '#f43f5e', '#a855f7', '#f59e0b', '#14b8a6'];
+        const activeItems = beneficiaryBreakdown.filter(b => b.total > 0);
+        if (activeItems.length === 0) {
+          return {
+            labels: ['Χωρίς Έξοδα'],
+            datasets: [{ data: [1], backgroundColor: ['#e2e8f0'] }]
+          };
+        }
+        return {
+          labels: activeItems.map(b => b.name),
+          datasets: [{
+            data: activeItems.map(b => b.total),
+            backgroundColor: palette.slice(0, activeItems.length),
+            borderWidth: 2,
+            borderColor: '#ffffff'
+          }]
+        };
+      }, [beneficiaryBreakdown]);
+
+      // Budget vs Actual Comparison per Category
+      const budgetVsActualCategories = useMemo(() => {
+        return CATEGORIES.map(cat => {
+          const fixedItem = (budgetConfig.fixedExpenses || []).find(f => f.category === cat.id);
+          const budgeted = fixedItem ? parseFloat(fixedItem.amount) || 0 : (variableBudget / 8);
+          const actual = currentMonthReceipts.filter(r => r.category === cat.id).reduce((acc, r) => acc + r.total, 0);
+          const diff = budgeted - actual;
+          const percent = budgeted > 0 ? (actual / budgeted) * 100 : 0;
+          return {
+            ...cat,
+            budgeted,
+            actual,
+            diff,
+            percent,
+            isFixed: !!fixedItem
+          };
+        });
+      }, [budgetConfig, variableBudget, currentMonthReceipts]);
+
+      // Budget vs Actual Bar Chart Dataset
+      const budgetBarData = useMemo(() => {
+        const topCats = budgetVsActualCategories.filter(c => c.budgeted > 0 || c.actual > 0).slice(0, 8);
+        return {
+          labels: topCats.map(c => c.label.split('/')[0]),
+          datasets: [
+            {
+              label: 'Προϋπολογισμός (€)',
+              data: topCats.map(c => c.budgeted),
+              backgroundColor: '#94a3b8',
+              borderRadius: 6
+            },
+            {
+              label: 'Πραγματικά (€)',
+              data: topCats.map(c => c.actual),
+              backgroundColor: '#6366f1',
+              borderRadius: 6
+            }
+          ]
+        };
+      }, [budgetVsActualCategories]);
+
+      // Weekly Spending Trend Dataset (Weeks 1 to 4)
+      const weeklyTrendData = useMemo(() => {
+        const weeklySums = [0, 0, 0, 0];
+        currentMonthReceipts.forEach(r => {
+          const p = parseSmartDate(r.date);
+          const d = p.day || 1;
+          const w = Math.min(3, Math.floor((d - 1) / 7));
+          weeklySums[w] += r.total;
+        });
+
+        return {
+          labels: ['Εβδομάδα 1 (1-7)', 'Εβδομάδα 2 (8-14)', 'Εβδομάδα 3 (15-21)', 'Εβδομάδα 4 (22+)'],
+          datasets: [
+            {
+              label: 'Έξοδα Εβδομάδας (€)',
+              data: weeklySums,
+              backgroundColor: '#3b82f6',
+              borderRadius: 8
+            },
+            {
+              type: 'line',
+              label: 'Στόχος Εβδομάδας (€)',
+              data: [standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance],
+              borderColor: '#ef4444',
+              borderWidth: 2,
+              borderDash: [5, 5],
+              fill: false
+            }
+          ]
+        };
+      }, [currentMonthReceipts, standardWeeklyAllowance]);
 
       const filteredReceipts = useMemo(() => {
         const filtered = activeReceipts.filter((r) => {
@@ -887,7 +1560,15 @@
           const matchesBeneficiary = beneficiaryFilter === 'All' || 
                                      ben === beneficiaryFilter ||
                                      (beneficiaryFilter === 'Κορίτσια' && (ben.includes('Κορίτσια') || ben.toLowerCase().includes('κοριτσ')));
-          return matchesSearch && matchesCategory && matchesMember && matchesBeneficiary;
+
+          let matchesMonth = true;
+          if (selectedMonth !== 'ALL') {
+            const p = parseSmartDate(r.date);
+            const mStr = `${String(p.month).padStart(2, '0')}/${p.year}`;
+            matchesMonth = (mStr === selectedMonth);
+          }
+
+          return matchesSearch && matchesCategory && matchesMember && matchesBeneficiary && matchesMonth;
         });
 
         return filtered.sort((a, b) => {
@@ -896,6 +1577,9 @@
           if (sortField === 'date') {
             valA = parseDateForSort(a.date);
             valB = parseDateForSort(b.date);
+          } else if (sortField === 'registrationDate') {
+            valA = a.registrationDate || a.date;
+            valB = b.registrationDate || b.date;
           } else if (sortField === 'total') {
             valA = a.total;
             valB = b.total;
@@ -923,17 +1607,17 @@
           if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
           return 0;
         });
-      }, [activeReceipts, searchTerm, categoryFilter, memberFilter, beneficiaryFilter, sortField, sortDirection]);
+      }, [activeReceipts, searchTerm, categoryFilter, memberFilter, beneficiaryFilter, selectedMonth, sortField, sortDirection]);
 
       const uncategorizedReceipts = useMemo(() => {
         return activeReceipts.filter(r => r.category === 'Uncategorized');
       }, [activeReceipts]);
 
       return (
-        <div className="min-h-screen pb-16">
+        <div className="min-h-screen pb-16 bg-slate-50">
           {/* Header */}
           <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
-            <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col md:flex-row items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
                 <div className="p-2.5 bg-indigo-600 text-white rounded-2xl shadow-lg">
                   ✨
@@ -949,44 +1633,71 @@
                 </div>
               </div>
 
-              {/* Cloud Live Status & Nav Tabs */}
-              <div className="flex items-center space-x-2 w-full sm:w-auto flex-wrap gap-y-2 justify-end">
+              {/* Month Selector + Live Status + Tabs */}
+              <div className="flex items-center space-x-2 w-full md:w-auto flex-wrap gap-y-2 justify-end">
+                {/* Month Selector Dropdown */}
+                <div className="flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 shadow-inner">
+                  <span className="text-xs">📅</span>
+                  <select
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(e.target.value)}
+                    className="bg-transparent text-xs font-bold text-slate-700 outline-none cursor-pointer"
+                  >
+                    <option value="ALL">📅 Όλοι οι Μήνες</option>
+                    {availableMonths.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Cloud Connection Badge */}
-                <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition ${isCloudConnected ? 'bg-emerald-50 text-emerald-800 border-emerald-300' : 'bg-amber-50 text-amber-800 border-amber-300'}`} title="Google Cloud Firestore Live Status">
+                <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold border transition ${isCloudConnected ? 'bg-emerald-50 text-emerald-800 border-emerald-300' : 'bg-amber-50 text-amber-800 border-amber-300'}`} title="Google Cloud Firestore Live Status">
                   <span className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-amber-500 animate-ping' : (isCloudConnected ? 'bg-emerald-500' : 'bg-amber-500')}`}></span>
                   <span>{isSyncing ? 'Συγχρονισμός...' : (isCloudConnected ? 'Live Cloud 🟢' : 'Σύνδεση...')}</span>
                 </div>
 
+                {/* Tabs */}
                 <button
                   onClick={() => setActiveTab('dashboard')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'dashboard' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${activeTab === 'dashboard' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
                   📊 Dashboard
                 </button>
                 <button
+                  onClick={() => setActiveTab('budget')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${activeTab === 'budget' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                >
+                  🎯 Προϋπολογισμός
+                </button>
+                <button
                   onClick={() => setActiveTab('receipts')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'receipts' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${activeTab === 'receipts' ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >
                   🧾 Λίστα ({activeReceipts.length})
                 </button>
                 <button
                   onClick={() => setActiveTab('trash')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold transition ${activeTab === 'trash' ? 'bg-amber-600 text-white shadow-md' : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'}`}
-                  title="Κάδος Ανακύκλωσης (Διαγραμμένες Αποδείξεις)"
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${activeTab === 'trash' ? 'bg-amber-600 text-white shadow-md' : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200'}`}
+                  title="Κάδος Ανακύκλωσης"
                 >
                   🗑️ Κάδος ({deletedReceipts.length})
                 </button>
-                <button onClick={() => excelImportRef.current?.click()} className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md transition flex items-center gap-1" title="Εισαγωγή αρχείου Excel στη βάση Cloud">
+
+                {/* Action Buttons */}
+                <button onClick={() => setShowExcelImportModal(true)} className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow transition flex items-center gap-1" title="Εισαγωγή Excel">
                   <span>📥</span> <span>Excel</span>
                 </button>
-                <button onClick={exportToExcel} className="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-200 transition" title="Εξαγωγή σε Excel">
-                  📊 Εξαγωγή
+                <button onClick={() => setShowCustomizeModal(true)} className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-200 transition" title="Εμφάνιση / Απόκρυψη Panels">
+                  ⚙️ Panels
                 </button>
-                <button onClick={exportBackupJSON} className="px-2.5 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold transition" title="Κατέβασμα αντιγράφου ασφαλείας">
-                  💾 Backup
+                <button onClick={exportToExcel} className="px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold border border-slate-200 transition" title="Εξαγωγή σε Excel">
+                  📊
                 </button>
-                <button onClick={() => setShowDeleteModal(true)} className="px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition" title="Διαχείριση παλιών δεδομένων">
-                  ⚙️ Εκκαθάριση
+                <button onClick={exportBackupJSON} className="px-2.5 py-1.5 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-xs font-bold transition" title="Κατέβασμα αντιγράφου ασφαλείας">
+                  💾
+                </button>
+                <button onClick={() => setShowDeleteModal(true)} className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold transition" title="Εκκαθάριση παλιών δεδομένων">
+                  🧹
                 </button>
               </div>
             </div>
@@ -995,119 +1706,150 @@
           <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
 
             {/* Hidden Input Elements for File Pickers */}
-            <input type="file" ref={cameraInputRef} onChange={handleFileUpload} accept="image/*" capture="environment" className="hidden" />
-            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" multiple className="hidden" />
+            <input type="file" ref={cameraInputRef} onChange={handleRealPhotoOCR} accept="image/*" capture="environment" className="hidden" />
+            <input type="file" ref={fileInputRef} onChange={handleRealPhotoOCR} accept="image/*" multiple className="hidden" />
             <input type="file" ref={excelImportRef} onChange={handleExcelImport} accept=".xlsx, .xls, .csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel" className="hidden" />
+            <input type="file" ref={budgetExcelImportRef} onChange={handleBudgetExcelImport} accept=".xlsx, .xls, .csv" className="hidden" />
             <input type="file" ref={restoreJsonRef} onChange={importBackupJSON} accept=".json" className="hidden" />
 
+            {/* OCR Active Scanning High-Tech Progress Banner */}
+            {isOcrProcessing && (
+              <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-purple-900 text-white p-5 rounded-3xl shadow-xl border border-indigo-400/40 animate-pulse space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl animate-spin">⚙️</span>
+                    <div>
+                      <h3 className="font-black text-sm text-indigo-100 flex items-center gap-2">
+                        <span>🔍 Tesseract AI OCR Receipt Scanner</span>
+                        <span className="px-2 py-0.5 rounded-full bg-indigo-500/40 text-xs font-bold text-white border border-indigo-300">
+                          {ocrProgress}%
+                        </span>
+                      </h3>
+                      <p className="text-xs text-indigo-200">{ocrMessage || 'Αναγνώριση Ελληνικών χαρακτήρων, καταστήματος, ποσού & ειδών...'}</p>
+                    </div>
+                  </div>
+                  <span className="text-xs text-indigo-300 font-mono hidden sm:inline">OCR v5.1 Greek+English</span>
+                </div>
+                <div className="w-full bg-black/40 rounded-full h-2.5 overflow-hidden border border-white/10">
+                  <div className="bg-gradient-to-r from-teal-400 via-cyan-400 to-indigo-300 h-full transition-all duration-300 rounded-full" style={{ width: `${ocrProgress}%` }}></div>
+                </div>
+              </div>
+            )}
+
             {/* Quick Actions & Manual Entry Trigger */}
-            <section className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-3 gap-3">
-                <div>
-                  <h2 className="text-base font-bold text-slate-800">⚡ Καταχώρηση Εξόδων (Κουμπιά, Φόρμα ή Φωνή)</h2>
-                  <p className="text-xs text-slate-400">Επιλέξτε πληρωτή, πατήστε κουμπί ή σκανάρετε μία-μία τις αποδείξεις</p>
+            {widgets.quickActions && (
+              <section className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-3 gap-3">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                      <span>⚡ Καταχώρηση Εξόδων (Κουμπιά, Φόρμα ή Φωνή)</span>
+                      <button onClick={() => toggleWidget('quickActions')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη Panel">👁️</button>
+                    </h2>
+                    <p className="text-xs text-slate-400">Επιλέξτε πληρωτή, πατήστε κουμπί ή σκανάρετε αποδείξεις με πραγματικό OCR</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setScanQueue([]);
+                        setFormData({
+                          date: getTodayFormatted(),
+                          registrationDate: getNowDateTimeFormatted(),
+                          merchant: '',
+                          subcategory: '',
+                          category: 'Supermarket',
+                          memberId: selectedMember,
+                          beneficiary: 'Όλη η Οικογένεια',
+                          total: '',
+                          paymentMethod: 'Card',
+                          notes: ''
+                        });
+                        setShowFormModal(true);
+                      }}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-bold transition shadow-md flex items-center gap-1"
+                    >
+                      <span>✏️</span>
+                      <span>Φόρμα Καταχώρησης</span>
+                    </button>
+                    <button
+                      onClick={handleVoiceInput}
+                      className={`px-4 py-2 rounded-2xl text-xs font-bold flex items-center gap-2 transition ${isListening ? 'bg-red-600 text-white animate-bounce' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+                    >
+                      <span>🎤</span>
+                      <span>{isListening ? 'Ακούω...' : 'Φωνητικό'}</span>
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      setScanQueue([]);
-                      setFormData({
-                        date: getTodayFormatted(),
-                        merchant: '',
-                        subcategory: '',
-                        category: 'Supermarket',
-                        memberId: selectedMember,
-                        beneficiary: 'Όλη η Οικογένεια',
-                        total: '',
-                        paymentMethod: 'Card',
-                        notes: ''
-                      });
-                      setShowFormModal(true);
-                    }}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-bold transition shadow-md flex items-center gap-1"
-                  >
-                    <span>✏️</span>
-                    <span>Φόρμα Καταχώρησης</span>
+
+                {/* Active Payer Selection */}
+                <div className="flex items-center space-x-2 bg-slate-100 p-2 rounded-2xl flex-wrap gap-1">
+                  <span className="text-xs font-bold text-slate-500 mr-1">Πληρωτής:</span>
+                  {members.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => setSelectedMember(m.id)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold transition ${selectedMember === m.id ? `${m.color}` : 'text-slate-600 hover:bg-slate-200'}`}
+                    >
+                      {m.name} ({m.role})
+                    </button>
+                  ))}
+                </div>
+
+                {/* Quick Action Preset Buttons */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2.5">
+                  <button onClick={() => openQuickExpenseModal('Supermarket', 'AB Vassilopoulos', 'Ψώνια', 45.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left hover:bg-emerald-100 transition">
+                    <span className="text-base block">🛒</span>
+                    <span className="text-xs font-bold text-emerald-900 block truncate">Supermarket</span>
+                    <span className="text-[10px] text-emerald-600 block">€45 - Προεπισκόπηση</span>
                   </button>
-                  <button
-                    onClick={handleVoiceInput}
-                    className={`px-4 py-2 rounded-2xl text-xs font-bold flex items-center gap-2 transition ${isListening ? 'bg-red-600 text-white animate-bounce' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
-                  >
-                    <span>🎤</span>
-                    <span>{isListening ? 'Ακούω...' : 'Φωνητικό'}</span>
+
+                  <button onClick={() => openQuickExpenseModal('Shopping & Gifts', 'Zara / Ρούχα', 'Μπλούζες', 60.00, 'Κορίτσια (Αγγελική & Χριστίνα 50-50)')} className="p-2.5 bg-pink-50 border border-pink-200 rounded-2xl text-left hover:bg-pink-100 transition">
+                    <span className="text-base block">👭</span>
+                    <span className="text-xs font-bold text-pink-900 block truncate">Ρούχα Κορίτσια</span>
+                    <span className="text-[10px] text-pink-600 block">€60 - Προεπισκόπηση</span>
+                  </button>
+
+                  <button onClick={() => openQuickExpenseModal('Fuel & Transport', 'EKO Gas', 'Βενζίνη', 50.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-amber-50 border border-amber-200 rounded-2xl text-left hover:bg-amber-100 transition">
+                    <span className="text-base block">⛽</span>
+                    <span className="text-xs font-bold text-amber-900 block truncate">Βενζίνη</span>
+                    <span className="text-[10px] text-amber-600 block">€50 - Προεπισκόπηση</span>
+                  </button>
+
+                  <button onClick={() => openQuickExpenseModal('Education & Hobbies', 'Φροντιστήριο', 'Δίδακτρα', 80.00, 'Θεοδώρα')} className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-2xl text-left hover:bg-indigo-100 transition">
+                    <span className="text-base block">📚</span>
+                    <span className="text-xs font-bold text-indigo-900 block truncate">Φροντιστήριο</span>
+                    <span className="text-[10px] text-indigo-600 block">€80 - Θεοδώρα</span>
+                  </button>
+
+                  <button onClick={() => openQuickExpenseModal('Loans & Tax', 'Δάνεια - Εφορία', 'Δόση', 120.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-red-50 border border-red-200 rounded-2xl text-left hover:bg-red-100 transition">
+                    <span className="text-base block">🏦</span>
+                    <span className="text-xs font-bold text-red-900 block truncate">Δάνεια/Εφορία</span>
+                    <span className="text-[10px] text-red-600 block">€120 - Προεπισκόπηση</span>
+                  </button>
+
+                  <button onClick={() => openQuickExpenseModal('Cigarettes', 'Περίπτερο', 'Τσιγάρα', 4.60, 'Νίκος')} className="p-2.5 bg-stone-50 border border-stone-200 rounded-2xl text-left hover:bg-stone-100 transition">
+                    <span className="text-base block">🚬</span>
+                    <span className="text-xs font-bold text-stone-900 block truncate">Τσιγάρα</span>
+                    <span className="text-[10px] text-stone-600 block">€4.60 - Νίκος</span>
                   </button>
                 </div>
-              </div>
 
-              {/* Active Payer Selection */}
-              <div className="flex items-center space-x-2 bg-slate-100 p-2 rounded-2xl flex-wrap gap-1">
-                <span className="text-xs font-bold text-slate-500 mr-1">Πληρωτής:</span>
-                {members.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => setSelectedMember(m.id)}
-                    className={`px-3 py-1 rounded-xl text-xs font-bold transition ${selectedMember === m.id ? `${m.color}` : 'text-slate-600 hover:bg-slate-200'}`}
-                  >
-                    {m.name} ({m.role})
+                {/* Real OCR Photo Upload Options */}
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-1">
+                  <button onClick={() => cameraInputRef.current?.click()} disabled={isOcrProcessing} className="p-2.5 rounded-2xl border border-dashed border-indigo-400 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs flex items-center justify-center gap-2 transition">
+                    <span>📸 AI OCR (Κάμερα / 1-1)</span>
                   </button>
-                ))}
-              </div>
-
-              {/* Quick Action Preset Buttons */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2.5">
-                <button onClick={() => openQuickExpenseModal('Supermarket', 'AB Vassilopoulos', 'Ψώνια', 45.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left hover:bg-emerald-100 transition">
-                  <span className="text-base block">🛒</span>
-                  <span className="text-xs font-bold text-emerald-900 block truncate">Supermarket</span>
-                  <span className="text-[10px] text-emerald-600 block">€45 - Προεπισκόπηση</span>
-                </button>
-
-                <button onClick={() => openQuickExpenseModal('Shopping & Gifts', 'Zara / Ρούχα', 'Μπλούζες', 60.00, 'Κορίτσια (Αγγελική & Χριστίνα 50-50)')} className="p-2.5 bg-pink-50 border border-pink-200 rounded-2xl text-left hover:bg-pink-100 transition">
-                  <span className="text-base block">👭</span>
-                  <span className="text-xs font-bold text-pink-900 block truncate">Ρούχα Κορίτσια</span>
-                  <span className="text-[10px] text-pink-600 block">€60 - Προεπισκόπηση</span>
-                </button>
-
-                <button onClick={() => openQuickExpenseModal('Fuel & Transport', 'EKO Gas', 'Βενζίνη', 50.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-amber-50 border border-amber-200 rounded-2xl text-left hover:bg-amber-100 transition">
-                  <span className="text-base block">⛽</span>
-                  <span className="text-xs font-bold text-amber-900 block truncate">Βενζίνη</span>
-                  <span className="text-[10px] text-amber-600 block">€50 - Προεπισκόπηση</span>
-                </button>
-
-                <button onClick={() => openQuickExpenseModal('Education & Hobbies', 'Φροντιστήριο', 'Δίδακτρα', 80.00, 'Θεοδώρα')} className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-2xl text-left hover:bg-indigo-100 transition">
-                  <span className="text-base block">📚</span>
-                  <span className="text-xs font-bold text-indigo-900 block truncate">Φροντιστήριο</span>
-                  <span className="text-[10px] text-indigo-600 block">€80 - Θεοδώρα</span>
-                </button>
-
-                <button onClick={() => openQuickExpenseModal('Loans & Tax', 'Δάνεια - Εφορία', 'Δόση', 120.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-red-50 border border-red-200 rounded-2xl text-left hover:bg-red-100 transition">
-                  <span className="text-base block">🏦</span>
-                  <span className="text-xs font-bold text-red-900 block truncate">Δάνεια/Εφορία</span>
-                  <span className="text-[10px] text-red-600 block">€120 - Προεπισκόπηση</span>
-                </button>
-
-                <button onClick={() => openQuickExpenseModal('Cigarettes', 'Περίπτερο', 'Τσιγάρα', 4.60, 'Νίκος')} className="p-2.5 bg-stone-50 border border-stone-200 rounded-2xl text-left hover:bg-stone-100 transition">
-                  <span className="text-base block">🚬</span>
-                  <span className="text-xs font-bold text-stone-900 block truncate">Τσιγάρα</span>
-                  <span className="text-[10px] text-stone-600 block">€4.60 - Νίκος</span>
-                </button>
-              </div>
-
-              {/* Sequential Photo Upload Options */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-1">
-                <button onClick={() => cameraInputRef.current?.click()} disabled={isScanning} className="p-2.5 rounded-2xl border border-dashed border-indigo-400 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs flex items-center justify-center gap-2">
-                  <span>📸 Φωτογραφία (1-1 Σάρωση)</span>
-                </button>
-                <button onClick={() => fileInputRef.current?.click()} disabled={isScanning} className="p-2.5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center gap-2">
-                  <span>🖼️ Πολλαπλή Σάρωση (Διαδοχική)</span>
-                </button>
-                <button onClick={() => excelImportRef.current?.click()} className="p-2.5 rounded-2xl border border-dashed border-emerald-400 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center gap-2">
-                  <span>📥 Εισαγωγή Excel</span>
-                </button>
-                <button onClick={downloadTemplate} className="p-2.5 rounded-2xl border border-dashed border-blue-400 bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center gap-2">
-                  <span>📄 Λήψη Προτύπου (Template)</span>
-                </button>
-              </div>
-            </section>
+                  <button onClick={() => fileInputRef.current?.click()} disabled={isOcrProcessing} className="p-2.5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xs flex items-center justify-center gap-2 transition">
+                    <span>🖼️ Πολλαπλές Φωτογραφίες</span>
+                  </button>
+                  <button onClick={() => setShowExcelImportModal(true)} className="p-2.5 rounded-2xl border border-dashed border-emerald-400 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center gap-2 transition">
+                    <span>📥 Εισαγωγή Excel</span>
+                  </button>
+                  <button onClick={downloadTemplate} className="p-2.5 rounded-2xl border border-dashed border-blue-400 bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold text-xs flex items-center justify-center gap-2 transition">
+                    <span>📄 Λήψη Προτύπου Excel</span>
+                  </button>
+                </div>
+              </section>
+            )}
 
             {/* Uncategorized Classifier with Toggle Option */}
             {uncategorizedReceipts.length > 0 && (
@@ -1154,154 +1896,479 @@
               </section>
             )}
 
-            {/* MONTH TO DATE (MTD) & GRAND TOTAL DISPLAY BANNER */}
-            <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Card 1: Grand Total */}
-              <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] font-semibold text-indigo-200 uppercase tracking-wider block">Συνολικά Έξοδα</span>
-                  <h3 className="text-3xl font-black mt-0.5">€{grandTotal.toFixed(2)}</h3>
-                  <span className="text-[11px] text-indigo-200 mt-1 block">{activeReceipts.length} Καταχωρημένες Εγγραφές</span>
-                </div>
-                <div className="text-3xl p-3 bg-white/10 rounded-2xl">💳</div>
-              </div>
-
-              {/* Card 2: Month To Date (MTD) */}
-              <div className="bg-gradient-to-r from-blue-700 to-cyan-800 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-semibold text-cyan-200 uppercase tracking-wider block">Month To Date (MTD)</span>
-                    <span className="px-1.5 py-0.5 rounded-full bg-cyan-500/30 text-[9px] font-bold text-cyan-100">1 - {mtdStats.dayOfMonth} Νοε</span>
+            {/* MONTH TO DATE (MTD) & GRAND TOTAL DISPLAY BANNER & WEEKLY ALLOWANCE */}
+            {widgets.weeklyAllowance && (
+              <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Card 1: Grand Total for Selected Period */}
+                <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-indigo-200 uppercase tracking-wider block">
+                        {selectedMonth === 'ALL' ? 'Συνολικά Έξοδα' : `Έξοδα Μήνα (${selectedMonth})`}
+                      </span>
+                      <button onClick={() => toggleWidget('weeklyAllowance')} className="text-indigo-300 hover:text-white text-xs" title="Απόκρυψη">👁️</button>
+                    </div>
+                    <h3 className="text-3xl font-black mt-0.5">€{currentMonthTotal.toFixed(2)}</h3>
+                    <span className="text-[11px] text-indigo-200 mt-1 block">
+                      {currentMonthReceipts.length} Εγγραφές {selectedMonth !== 'ALL' ? `(από ${activeReceipts.length} σύνολο)` : ''}
+                    </span>
                   </div>
-                  <h3 className="text-3xl font-black mt-0.5">€{mtdStats.total.toFixed(2)}</h3>
-                  <span className="text-[11px] text-cyan-200 mt-1 block">Μέσο όρο/ημέρα: €{mtdStats.dailyAverage.toFixed(2)} ({mtdStats.count} αποδείξεις)</span>
+                  <div className="text-3xl p-3 bg-white/10 rounded-2xl">💳</div>
                 </div>
-                <div className="text-3xl p-3 bg-white/10 rounded-2xl">📅</div>
-              </div>
 
-              {/* Card 3: Status / Last Update */}
-              <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
-                <div>
-                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">Τελευταία Ενημέρωση</span>
-                  <h3 className="text-2xl font-black mt-0.5">{mtdStats.lastUpdated}</h3>
-                  <span className="text-[11px] font-bold text-emerald-400 mt-1 block flex items-center gap-1">
-                    <span>🟢</span> Προστασία Δεδομένων Ενεργή
-                  </span>
+                {/* Card 2: Month To Date (MTD) - dynamically matching selected period expenses */}
+                <div className="bg-gradient-to-r from-blue-700 to-cyan-800 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-cyan-200 uppercase tracking-wider block">Month To Date (MTD)</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-cyan-500/30 text-[9px] font-bold text-cyan-100">
+                        {selectedMonth === 'ALL' ? 'Όλοι' : selectedMonth}
+                      </span>
+                    </div>
+                    <h3 className="text-3xl font-black mt-0.5">€{mtdStats.total.toFixed(2)}</h3>
+                    <span className="text-[11px] text-cyan-200 mt-1 block">
+                      Μέσο όρο/ημέρα: €{mtdStats.dailyAverage.toFixed(2)} ({mtdStats.count} αποδείξεις)
+                    </span>
+                  </div>
+                  <div className="text-3xl p-3 bg-white/10 rounded-2xl">📅</div>
                 </div>
-                <div className="text-3xl p-3 bg-white/10 rounded-2xl">🛡️</div>
-              </div>
-            </section>
 
-            {/* TAB CONTENT */}
+                {/* Card 3: Weekly Allowance: (Monthly Target - Fixed Budget - Variable Spent) / 4 */}
+                <div className="bg-gradient-to-r from-emerald-700 to-teal-800 text-white p-5 rounded-3xl shadow-md flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-emerald-200 uppercase tracking-wider block">Επιτρεπόμενο Εβδομαδιαίο Όριο</span>
+                      <span className={`px-2 py-0.5 rounded-full text-[9px] font-black ${remainingVariableBudget >= 0 ? 'bg-emerald-500/40 text-emerald-100' : 'bg-rose-500/80 text-white animate-pulse'}`}>
+                        {remainingVariableBudget >= 0 ? (currentWeekAllowance >= standardWeeklyAllowance * 0.8 ? '🟢 Ασφαλές' : '🟡 Προσοχή') : '🔴 Υπέρβαση'}
+                      </span>
+                    </div>
+                    <h3 className="text-3xl font-black mt-0.5">
+                      €{Math.max(0, currentWeekAllowance).toFixed(2)}
+                      <span className="text-xs font-normal text-emerald-200 ml-1">/ εβδομάδα</span>
+                    </h3>
+                    <span className="text-[11px] text-emerald-200 mt-1 block">
+                      Υπόλοιπο: €{remainingVariableBudget.toFixed(2)} (Στόχος: €{monthlyTarget} - Πάγια: €{totalFixedBudget})
+                    </span>
+                  </div>
+                  <div className="text-3xl p-3 bg-white/10 rounded-2xl">⏳</div>
+                </div>
+              </section>
+            )}
+
+            {/* TAB CONTENT: DASHBOARD */}
             {activeTab === 'dashboard' && (
               <div className="space-y-6">
 
-                {/* 1. ALL CATEGORIES GRID (NO SCROLL, ALL VISIBLE WITH PERCENTAGES) */}
-                <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-                  <div className="flex items-center justify-between border-b pb-3">
-                    <div>
-                      <h3 className="font-bold text-base text-slate-800">🏷️ Έξοδα ανά Κατηγορία (Όλες οι Κατηγορίες & Ποσοστά)</h3>
-                      <p className="text-xs text-slate-400">Άμεση επισκόπηση όλων των κατηγοριών στην οθόνη χωρίς scrolling</p>
-                    </div>
-                    <span className="text-xs font-bold px-3 py-1 bg-indigo-50 text-indigo-700 rounded-xl border border-indigo-100">12 Κατηγορίες</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                    {categoryBreakdown.map((cat) => (
-                      <div key={cat.id} className={`p-3 rounded-2xl border transition-all flex flex-col justify-between ${cat.total > 0 ? 'bg-slate-50 border-slate-200' : 'bg-slate-50/40 border-slate-100 opacity-60'}`}>
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-xl">{cat.icon}</span>
-                            <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800">
-                              {cat.percent.toFixed(1)}%
-                            </span>
+                {/* 1. INTERACTIVE PIE CHARTS ROW (CATEGORY & BENEFICIARY) */}
+                {(widgets.categoryPie || widgets.beneficiaryPie) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Category Pie Chart */}
+                    {widgets.categoryPie && (
+                      <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                        <div className="flex items-center justify-between border-b pb-3">
+                          <div>
+                            <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                              <span>🥧 Έξοδα ανά Κατηγορία (Μηνιαία Πίτα)</span>
+                              <button onClick={() => toggleWidget('categoryPie')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                            </h3>
+                            <p className="text-xs text-slate-400">Ποσοστιαία κατανομή εξόδων ανά κατηγορία ({selectedMonth === 'ALL' ? 'Όλοι οι μήνες' : selectedMonth})</p>
                           </div>
-                          <p className="text-xs font-bold text-slate-800 truncate" title={cat.label}>{cat.label.split('/')[0]}</p>
-                          <p className="text-[10px] text-slate-400">{cat.count} εγγραφές</p>
+                          <span className="text-xs font-bold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-xl">Chart.js</span>
                         </div>
-                        <div className="mt-2 pt-2 border-t border-slate-200/60">
-                          <p className="text-sm font-black text-slate-900">€{cat.total.toFixed(2)}</p>
-                          <div className="w-full h-1.5 bg-slate-200 rounded-full mt-1 overflow-hidden">
-                            <div className="h-full bg-indigo-600 transition-all duration-500" style={{ width: `${cat.percent}%` }}></div>
+                        <DynamicChart type="doughnut" data={categoryPieData} height={280} />
+                      </section>
+                    )}
+
+                    {/* Beneficiary Pie Chart */}
+                    {widgets.beneficiaryPie && (
+                      <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                        <div className="flex items-center justify-between border-b pb-3">
+                          <div>
+                            <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                              <span>🎯 Έξοδα ανά Δικαιούχο (Ποιον Αφορούν)</span>
+                              <button onClick={() => toggleWidget('beneficiaryPie')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                            </h3>
+                            <p className="text-xs text-slate-400">Πόσα είναι της οικογένειας, του Νίκου, της Άνθης & των παιδιών σε πίτα</p>
                           </div>
+                          <span className="text-xs font-bold px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-xl">Chart.js</span>
                         </div>
-                      </div>
-                    ))}
+                        <DynamicChart type="doughnut" data={beneficiaryPieData} height={280} />
+                      </section>
+                    )}
                   </div>
-                </section>
+                )}
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-                  {/* 2. EXPENSES BY BENEFICIARY */}
+                {/* 2. BUDGET VS ACTUAL DASHBOARD (BAR CHART & CATEGORY BREAKDOWN TABLE) */}
+                {widgets.budgetVsActual && (
                   <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-                    <div className="flex items-center justify-between border-b pb-3">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-3 gap-2">
                       <div>
-                        <h3 className="font-bold text-base text-slate-800">🎯 Ποιον Αφορούν τα Έξοδα (Δικαιούχοι)</h3>
-                        <p className="text-xs text-slate-400">Πόσα είναι της οικογένειας, του Νίκου, της Άνθης & των παιδιών</p>
+                        <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                          <span>📊 Προϋπολογισμός vs Απολογισμός ανά Κατηγορία</span>
+                          <button onClick={() => toggleWidget('budgetVsActual')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                        </h3>
+                        <p className="text-xs text-slate-400">Σύγκριση προϋπολογισμένων με πραγματικά έξοδα και υπόλοιπα</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs px-2.5 py-1 bg-slate-100 text-slate-700 rounded-xl font-bold">
+                          Στόχος: €{monthlyTarget}
+                        </span>
+                        <span className="text-xs px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-xl font-bold">
+                          Πραγματικά: €{currentMonthTotal.toFixed(2)}
+                        </span>
                       </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {beneficiaryBreakdown.map((ben) => (
-                        <div key={ben.name} className="p-3 bg-indigo-50/40 border border-indigo-100 rounded-2xl flex items-center justify-between">
-                          <div className="flex items-center space-x-2.5">
-                            <span className="text-base">🎯</span>
-                            <div>
-                              <p className="text-xs font-bold text-slate-800">{ben.name}</p>
-                              <div className="w-32 sm:w-48 h-2 bg-slate-200 rounded-full mt-1 overflow-hidden">
-                                <div className="h-full bg-indigo-600 transition-all duration-500" style={{ width: `${ben.percent}%` }}></div>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-center">
+                      <div className="lg:col-span-1">
+                        <DynamicChart type="bar" data={budgetBarData} height={270} />
+                      </div>
+                      <div className="lg:col-span-2 overflow-x-auto">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 text-slate-500 font-bold border-b text-[11px]">
+                              <th className="py-2.5 px-3">Κατηγορία</th>
+                              <th className="py-2.5 px-3 text-right">Προϋπολογισμός</th>
+                              <th className="py-2.5 px-3 text-right">Πραγματικά</th>
+                              <th className="py-2.5 px-3 text-right">Διαφορά</th>
+                              <th className="py-2.5 px-3">Ποσοστό Κάλυψης</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {budgetVsActualCategories.map(cat => (
+                              <tr key={cat.id} className="hover:bg-slate-50">
+                                <td className="py-2 px-3 font-bold text-slate-800 flex items-center gap-1.5">
+                                  <span>{cat.icon}</span>
+                                  <span>{cat.label.split('/')[0]}</span>
+                                  {cat.isFixed && <span className="px-1.5 py-0.2 rounded text-[9px] bg-purple-100 text-purple-700 font-bold">Πάγιο</span>}
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono text-slate-500">€{cat.budgeted.toFixed(2)}</td>
+                                <td className="py-2 px-3 text-right font-mono font-bold text-slate-800">€{cat.actual.toFixed(2)}</td>
+                                <td className={`py-2 px-3 text-right font-mono font-bold ${cat.diff >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                  {cat.diff >= 0 ? `+€${cat.diff.toFixed(2)}` : `-€${Math.abs(cat.diff).toFixed(2)}`}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
+                                      <div
+                                        className={`h-full transition-all ${cat.percent <= 80 ? 'bg-emerald-500' : (cat.percent <= 100 ? 'bg-amber-500' : 'bg-rose-500')}`}
+                                        style={{ width: `${Math.min(100, cat.percent)}%` }}
+                                      ></div>
+                                    </div>
+                                    <span className="font-mono text-[10px] text-slate-600 font-bold">{cat.percent.toFixed(0)}%</span>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                {/* 3. WEEKLY SPENDING TRAJECTORY & FAMILY MEMBERS */}
+                {(widgets.weeklyTrend || widgets.memberStats) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Weekly Trend (Weeks 1 to 4 vs Weekly Target Line) */}
+                    {widgets.weeklyTrend && (
+                      <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                        <div className="flex items-center justify-between border-b pb-3">
+                          <div>
+                            <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                              <span>📈 Εβδομαδιαία Τάση Εξόδων (1-4 Εβδομάδες)</span>
+                              <button onClick={() => toggleWidget('weeklyTrend')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                            </h3>
+                            <p className="text-xs text-slate-400">Έξοδα ανά 7ήμερο σε σχέση με το επιτρεπόμενο εβδομαδιαίο όριο (€{standardWeeklyAllowance.toFixed(2)})</p>
+                          </div>
+                          <span className="text-xs font-bold px-2.5 py-1 bg-blue-50 text-blue-700 rounded-xl">Εβδομαδιαίο</span>
+                        </div>
+                        <DynamicChart type="bar" data={weeklyTrendData} height={270} />
+                      </section>
+                    )}
+
+                    {/* Member Breakdown */}
+                    {widgets.memberStats && (
+                      <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                        <div className="flex items-center justify-between border-b pb-3">
+                          <div>
+                            <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                              <span>👨‍👩‍👧‍👦 Πληρωμές & Έξοδα ανά Μέλος</span>
+                              <button onClick={() => toggleWidget('memberStats')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                            </h3>
+                            <p className="text-xs text-slate-400">Ποιος πλήρωσε και ποια έξοδα αφορούν προσωπικά το κάθε μέλος</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-3">
+                          {memberBreakdown.map((m) => (
+                            <div key={m.id} className="p-3 bg-slate-50 border border-slate-100 rounded-2xl space-y-2">
+                              <div className="flex justify-between items-center text-xs font-bold">
+                                <span className="flex items-center gap-2">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] ${m.badge}`}>{m.name} ({m.role})</span>
+                                  <span className="text-slate-400 font-normal">({m.count} πληρωμές)</span>
+                                </span>
+                                <span className="font-black text-slate-800">Πληρώθηκαν: €{m.total.toFixed(2)}</span>
                               </div>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <span className="text-sm font-black text-slate-900 block">€{ben.total.toFixed(2)}</span>
-                            <span className="text-[10px] font-bold text-indigo-600">{ben.percent.toFixed(1)}%</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
 
-                  {/* 3. EXPENSES BY PAYER */}
+                              <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                                <div className="h-full bg-indigo-600 transition-all duration-500" style={{ width: `${m.percent}%` }}></div>
+                              </div>
+
+                              {m.beneficiarySum > 0 && (
+                                <div className="flex justify-between items-center text-[11px] text-indigo-700 bg-indigo-50/80 p-1.5 rounded-xl border border-indigo-100">
+                                  <span>🎯 Προσωπικά έξοδα που αφορούν {m.name}:</span>
+                                  <span className="font-extrabold">€{m.beneficiarySum.toFixed(2)}</span>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+                  </div>
+                )}
+
+                {/* 4. ALL CATEGORIES 12-GRID */}
+                {widgets.categoryGrid && (
                   <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
                     <div className="flex items-center justify-between border-b pb-3">
                       <div>
-                        <h3 className="font-bold text-base text-slate-800">👨‍👩‍👧‍👦 Πληρωμές ανά Μέλος Οικογένειας</h3>
-                        <p className="text-xs text-slate-400">Ποιος έβγαλε τα χρήματα από την τσέπη του</p>
+                        <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                          <span>🏷️ Όλες οι Κατηγορίες Εξόδων (12 Κατηγορίες)</span>
+                          <button onClick={() => toggleWidget('categoryGrid')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                        </h3>
+                        <p className="text-xs text-slate-400">Επισκόπηση ποσών και ποσοστών χωρίς scrolling</p>
                       </div>
+                      <span className="text-xs font-bold px-3 py-1 bg-indigo-50 text-indigo-700 rounded-xl border border-indigo-100">12 Κατηγορίες</span>
                     </div>
 
-                    <div className="space-y-3">
-                      {memberBreakdown.map((m) => (
-                        <div key={m.id} className="p-3 bg-slate-50 border border-slate-100 rounded-2xl space-y-2">
-                          <div className="flex justify-between items-center text-xs font-bold">
-                            <span className="flex items-center gap-2">
-                              <span className={`px-2 py-0.5 rounded text-[10px] ${m.badge}`}>{m.name} ({m.role})</span>
-                              <span className="text-slate-400 font-normal">({m.count} πληρωμές)</span>
-                            </span>
-                            <span className="font-black text-slate-800">Πληρώθηκαν: €{m.total.toFixed(2)}</span>
-                          </div>
-
-                          <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-indigo-600 transition-all duration-500" style={{ width: `${m.percent}%` }}></div>
-                          </div>
-
-                          {m.beneficiarySum > 0 && (
-                            <div className="flex justify-between items-center text-[11px] text-indigo-700 bg-indigo-50/80 p-1.5 rounded-xl border border-indigo-100">
-                              <span>🎯 Προσωπικά έξοδα που αφορούν {m.name}:</span>
-                              <span className="font-extrabold">€{m.beneficiarySum.toFixed(2)}</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                      {categoryBreakdown.map((cat) => (
+                        <div key={cat.id} className={`p-3 rounded-2xl border transition-all flex flex-col justify-between ${cat.total > 0 ? 'bg-slate-50 border-slate-200' : 'bg-slate-50/40 border-slate-100 opacity-60'}`}>
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xl">{cat.icon}</span>
+                              <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800">
+                                {cat.percent.toFixed(1)}%
+                              </span>
                             </div>
-                          )}
+                            <p className="text-xs font-bold text-slate-800 truncate" title={cat.label}>{cat.label.split('/')[0]}</p>
+                            <p className="text-[10px] text-slate-400">{cat.count} εγγραφές</p>
+                          </div>
+                          <div className="mt-2 pt-2 border-t border-slate-200/60">
+                            <p className="text-sm font-black text-slate-900">€{cat.total.toFixed(2)}</p>
+                            <div className="w-full h-1.5 bg-slate-200 rounded-full mt-1 overflow-hidden">
+                              <div className="h-full bg-indigo-600 transition-all duration-500" style={{ width: `${cat.percent}%` }}></div>
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </div>
                   </section>
-                </div>
+                )}
+
               </div>
             )}
 
+            {/* TAB CONTENT: BUDGET & FIXED EXPENSES */}
+            {activeTab === 'budget' && (
+              <div className="space-y-6">
+                {/* Monthly Target & Weekly Allowance Mathematical Model */}
+                <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-4 gap-3">
+                    <div>
+                      <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
+                        <span>🎯 Στόχος Μηνιαίων Εξόδων & Εβδομαδιαίο Όριο</span>
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Ρυθμίστε τον μηνιαίο στόχο και δείτε πώς υπολογίζεται αυτόματα το επιτρεπόμενο ποσό ανά εβδομάδα.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="50"
+                        value={tempMonthlyTarget}
+                        onChange={(e) => setTempMonthlyTarget(e.target.value)}
+                        className="px-4 py-2 border rounded-xl text-sm font-black text-indigo-700 bg-indigo-50/50 w-32 text-right"
+                      />
+                      <button
+                        onClick={() => saveBudgetConfigToCloud({ ...budgetConfig, monthlyTarget: parseFloat(tempMonthlyTarget) || 2500 })}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow"
+                      >
+                        💾 Αποθήκευση
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 4 KPI Summary Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
+                      <span className="text-xs font-bold text-indigo-700 block">1. Στόχος Εξόδων Μήνα</span>
+                      <h4 className="text-2xl font-black text-indigo-900 mt-1">€{monthlyTarget.toFixed(2)}</h4>
+                      <p className="text-[11px] text-indigo-600 mt-1">Συνολικό μηνιαίο budget</p>
+                    </div>
+
+                    <div className="p-4 bg-purple-50 rounded-2xl border border-purple-100">
+                      <span className="text-xs font-bold text-purple-700 block">2. Σύνολο Πάγιων Εξόδων</span>
+                      <h4 className="text-2xl font-black text-purple-900 mt-1">€{totalFixedBudget.toFixed(2)}</h4>
+                      <p className="text-[11px] text-purple-600 mt-1">{budgetConfig.fixedExpenses?.length || 0} πάγια έξοδα</p>
+                    </div>
+
+                    <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100">
+                      <span className="text-xs font-bold text-blue-700 block">3. Διαθέσιμο Μεταβλητό</span>
+                      <h4 className="text-2xl font-black text-blue-900 mt-1">€{variableBudget.toFixed(2)}</h4>
+                      <p className="text-[11px] text-blue-600 mt-1">Στόχος μείον Πάγια</p>
+                    </div>
+
+                    <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                      <span className="text-xs font-bold text-emerald-700 block">4. Εβδομαδιαίο Όριο (διά 4)</span>
+                      <h4 className="text-2xl font-black text-emerald-900 mt-1">€{standardWeeklyAllowance.toFixed(2)}</h4>
+                      <p className="text-[11px] text-emerald-600 mt-1">Επιτρεπόμενο έξοδο/εβδομάδα</p>
+                    </div>
+                  </div>
+
+                  {/* Mathematical Live Explanation Formula */}
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
+                    <h5 className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <span>💡</span>
+                      <span>Μαθηματικός Υπολογισμός Εβδομαδιαίου Υπολοίπου (Live):</span>
+                    </h5>
+                    <div className="text-xs text-slate-600 leading-relaxed font-mono bg-white p-3 rounded-xl border border-slate-200">
+                      <p>• <strong>Υπόλοιπο Μεταβλητού Budget</strong> = Στόχος (€{monthlyTarget}) - Πάγια (€{totalFixedBudget}) - Έξοδα που έγιναν (€{actualVariableSpent.toFixed(2)}) = <strong className="text-indigo-700">€{remainingVariableBudget.toFixed(2)}</strong></p>
+                      <p>• <strong>Επιτρεπόμενο Έξοδο Τρέχουσας Εβδομάδας</strong> = Υπόλοιπο (€{remainingVariableBudget.toFixed(2)}) / {remainingWeeks} εβδομάδες = <strong className="text-emerald-700 text-sm">€{Math.max(0, currentWeekAllowance).toFixed(2)} / εβδομάδα</strong></p>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Fixed Expenses Table & Excel Upload */}
+                <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-4 gap-3">
+                    <div>
+                      <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                        <span>📋 Προϋπολογισμός Πάγιων Εξόδων ανά Κατηγορία ({budgetConfig.fixedExpenses?.length || 0} έξοδα)</span>
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Ενοίκια, λογαριασμοί, δάνεια, φροντιστήρια. Μπορείτε να εισάγετε και μέσω Excel.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => budgetExcelImportRef.current?.click()}
+                        className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition shadow flex items-center gap-1.5"
+                      >
+                        <span>📥</span>
+                        <span>Εισαγωγή Πάγιων από Excel</span>
+                      </button>
+                      <button
+                        onClick={downloadBudgetTemplate}
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold border border-slate-200 transition flex items-center gap-1.5"
+                      >
+                        <span>📄</span>
+                        <span>Πρότυπο Excel</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Fixed Expenses Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50 text-slate-500 font-bold border-b text-[11px]">
+                          <th className="py-3 px-4">Τίτλος Πάγιου Εξόδου</th>
+                          <th className="py-3 px-4">Κατηγορία</th>
+                          <th className="py-3 px-4">Ποιον Αφορά</th>
+                          <th className="py-3 px-4 text-right">Ποσό (€)</th>
+                          <th className="py-3 px-4 text-center">Ενέργειες</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {(budgetConfig.fixedExpenses || []).map((fix) => {
+                          const catObj = CATEGORIES.find(c => c.id === fix.category);
+                          return (
+                            <tr key={fix.id} className="hover:bg-slate-50">
+                              <td className="py-3 px-4 font-bold text-slate-800">{fix.title}</td>
+                              <td className="py-3 px-4">
+                                <span className={`px-2 py-0.5 rounded text-xs border ${catObj?.color || 'bg-slate-100'}`}>
+                                  {catObj?.icon} {catObj?.label.split('/')[0] || fix.category}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 text-slate-600">{fix.beneficiary || 'Όλη η Οικογένεια'}</td>
+                              <td className="py-3 px-4 text-right font-black text-slate-900">€{parseFloat(fix.amount).toFixed(2)}</td>
+                              <td className="py-3 px-4 text-center">
+                                <button
+                                  onClick={() => handleDeleteFixedExpense(fix.id)}
+                                  className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-lg text-xs font-bold transition"
+                                >
+                                  🗑️
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-50 font-black text-xs border-t">
+                          <td colSpan="3" className="py-3 px-4 text-slate-700">ΣΥΝΟΛΟ ΠΑΓΙΩΝ ΕΞΟΔΩΝ:</td>
+                          <td className="py-3 px-4 text-right text-indigo-700">€{totalFixedBudget.toFixed(2)}</td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+
+                  {/* Add New Fixed Expense Form */}
+                  <form onSubmit={handleAddFixedExpense} className="pt-4 border-t grid grid-cols-1 sm:grid-cols-5 gap-3 items-end bg-slate-50 p-4 rounded-2xl">
+                    <div className="sm:col-span-2">
+                      <label className="text-[11px] font-bold text-slate-600 block mb-1">Τίτλος Νέου Πάγιου</label>
+                      <input
+                        type="text"
+                        placeholder="π.χ. Κοινόχρηστα / Ασφάλεια"
+                        value={newFixedTitle}
+                        onChange={(e) => setNewFixedTitle(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-xl text-xs bg-white font-semibold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-600 block mb-1">Κατηγορία</label>
+                      <select
+                        value={newFixedCategory}
+                        onChange={(e) => setNewFixedCategory(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-xl text-xs bg-white font-semibold"
+                      >
+                        {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label.split('/')[0]}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-600 block mb-1">Ποσό (€)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={newFixedAmount}
+                        onChange={(e) => setNewFixedAmount(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-xl text-xs bg-white font-black text-slate-800"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <button
+                        type="submit"
+                        className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow flex items-center justify-center gap-1"
+                      >
+                        <span>➕ Προσθήκη</span>
+                      </button>
+                    </div>
+                  </form>
+                </section>
+              </div>
+            )}
+
+            {/* TAB CONTENT: RECEIPTS LIST */}
             {activeTab === 'receipts' && (
-              /* RECEIPTS LIST TAB WITH FULL SORTING AND FILTERS */
+              /* RECEIPTS LIST TAB WITH DUAL DATES, FULL SORTING AND FILTERS */
               <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden space-y-4 p-5">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
                   <input
@@ -1343,7 +2410,8 @@
                       onChange={(e) => setSortField(e.target.value)}
                       className="w-full px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50/40 text-xs font-bold text-indigo-900"
                     >
-                      <option value="date">📅 Ημερομηνία</option>
+                      <option value="date">📅 Ημ. Απόδειξης</option>
+                      <option value="registrationDate">⏰ Ημ. Καταχώρησης</option>
                       <option value="total">💶 Ποσό (€)</option>
                       <option value="merchant">🏪 Κατάστημα</option>
                       <option value="subcategory">📝 Υποκατηγορία</option>
@@ -1354,9 +2422,9 @@
                     <button
                       onClick={() => setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc')}
                       className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition"
-                      title="Αλλαγή Σειράς (Αύξουσα / Φθίνουσας)"
+                      title="Αλλαγή Σειράς"
                     >
-                      {sortDirection === 'asc' ? '⬆️ Αύξ' : '⬇️ Φθίν'}
+                      {sortDirection === 'asc' ? '⬆️' : '⬇️'}
                     </button>
                   </div>
                 </div>
@@ -1365,28 +2433,31 @@
                   <table className="w-full text-left border-collapse text-sm">
                     <thead>
                       <tr className="bg-slate-50 text-slate-500 text-[11px] uppercase font-bold border-b border-slate-100 cursor-pointer select-none">
-                        <th onClick={() => handleSort('date')} className="py-3 px-4 hover:text-indigo-600">
-                          Ημερομηνία {sortField === 'date' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
+                        <th onClick={() => handleSort('date')} className="py-3 px-3 hover:text-indigo-600 whitespace-nowrap">
+                          Ημ. Απόδειξης {sortField === 'date' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('merchant')} className="py-3 px-4 hover:text-indigo-600">
-                          Κατάστημα / Παραλήπτης {sortField === 'merchant' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
+                        <th onClick={() => handleSort('registrationDate')} className="py-3 px-3 hover:text-indigo-600 text-[10px] whitespace-nowrap">
+                          Ημ. Καταχώρησης {sortField === 'registrationDate' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('subcategory')} className="py-3 px-4 hover:text-indigo-600">
-                          Υποκατηγορία {sortField === 'subcategory' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
+                        <th onClick={() => handleSort('merchant')} className="py-3 px-3 hover:text-indigo-600">
+                          Κατάστημα {sortField === 'merchant' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('category')} className="py-3 px-4 hover:text-indigo-600">
+                        <th onClick={() => handleSort('subcategory')} className="py-3 px-3 hover:text-indigo-600">
+                          Υποκατηγορία / Είδη {sortField === 'subcategory' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
+                        </th>
+                        <th onClick={() => handleSort('category')} className="py-3 px-3 hover:text-indigo-600">
                           Κατηγορία {sortField === 'category' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('memberName')} className="py-3 px-4 hover:text-indigo-600">
+                        <th onClick={() => handleSort('memberName')} className="py-3 px-3 hover:text-indigo-600">
                           Πληρωτής {sortField === 'memberName' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('beneficiary')} className="py-3 px-4 bg-indigo-50/50 text-indigo-800 hover:text-indigo-900">
+                        <th onClick={() => handleSort('beneficiary')} className="py-3 px-3 bg-indigo-50/50 text-indigo-800 hover:text-indigo-900">
                           Ποιον Αφορά {sortField === 'beneficiary' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th onClick={() => handleSort('total')} className="py-3 px-4 text-right hover:text-indigo-600">
+                        <th onClick={() => handleSort('total')} className="py-3 px-3 text-right hover:text-indigo-600 whitespace-nowrap">
                           Ποσό (€) {sortField === 'total' ? (sortDirection === 'asc' ? '▲' : '▼') : '⇅'}
                         </th>
-                        <th className="py-3 px-4 text-center">Διόρθωση</th>
+                        <th className="py-3 px-3 text-center whitespace-nowrap">Ενέργειες</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1398,30 +2469,31 @@
 
                         return (
                           <tr key={r.id} className="hover:bg-slate-50">
-                            <td className="py-3 px-4 font-mono text-xs text-slate-500 font-bold">{r.date}</td>
-                            <td className="py-3 px-4 font-bold text-slate-800">{r.merchant}</td>
-                            <td className="py-3 px-4 text-xs text-slate-600">{r.subcategory || '-'}</td>
-                            <td className="py-3 px-4">
+                            <td className="py-3 px-3 font-mono text-xs text-indigo-800 font-bold whitespace-nowrap">{r.date}</td>
+                            <td className="py-3 px-3 font-mono text-[10px] text-slate-400 whitespace-nowrap">{r.registrationDate || r.date}</td>
+                            <td className="py-3 px-3 font-bold text-slate-800">{r.merchant}</td>
+                            <td className="py-3 px-3 text-xs text-slate-600 max-w-xs truncate" title={r.subcategory}>{r.subcategory || '-'}</td>
+                            <td className="py-3 px-3">
                               <span className={`px-2 py-0.5 rounded text-xs border ${cObj?.color || 'bg-slate-100'}`}>
                                 {cObj?.icon} {cObj?.label.split('/')[0] || r.category}
                               </span>
                             </td>
-                            <td className="py-3 px-4">
+                            <td className="py-3 px-3">
                               <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold border ${mObj?.badge || ''}`}>
                                 {r.memberName}
                               </span>
                             </td>
-                            <td className="py-3 px-4 bg-indigo-50/30">
-                              <span className={`px-2.5 py-1 rounded-lg text-xs border ${badgeStyle}`}>
+                            <td className="py-3 px-3 bg-indigo-50/30">
+                              <span className={`px-2 py-0.5 rounded-lg text-xs border ${badgeStyle}`}>
                                 🎯 {benText}
                               </span>
                             </td>
-                            <td className="py-3 px-4 text-right font-black text-slate-900">€{r.total.toFixed(2)}</td>
-                            <td className="py-3 px-4 text-center space-x-1">
-                              <button onClick={() => setEditingReceipt({ ...r })} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition">
+                            <td className="py-3 px-3 text-right font-black text-slate-900 whitespace-nowrap">€{r.total.toFixed(2)}</td>
+                            <td className="py-3 px-3 text-center space-x-1 whitespace-nowrap">
+                              <button onClick={() => setEditingReceipt({ ...r })} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition" title="Επεξεργασία">
                                 ✏️
                               </button>
-                              <button onClick={() => deleteReceipt(r.id)} className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold rounded-lg transition">
+                              <button onClick={() => deleteReceipt(r.id)} className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold rounded-lg transition" title="Διαγραφή">
                                 🗑️
                               </button>
                             </td>
@@ -1434,7 +2506,7 @@
               </section>
             )}
 
-            {/* TRASH TAB - SOFT DELETED ITEMS FOR ACCIDENTAL PROTECTION */}
+            {/* TAB CONTENT: TRASH */}
             {activeTab === 'trash' && (
               <section className="bg-white rounded-3xl border border-slate-200 shadow-sm p-6 space-y-4">
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-4 gap-3">
@@ -1502,7 +2574,8 @@
                     <table className="w-full text-left border-collapse text-sm">
                       <thead>
                         <tr className="bg-slate-50 text-slate-500 text-[11px] uppercase font-bold border-b border-slate-100">
-                          <th className="py-3 px-4">Ημερομηνία</th>
+                          <th className="py-3 px-4">Ημ. Απόδειξης</th>
+                          <th className="py-3 px-4">Ημ. Καταχώρησης</th>
                           <th className="py-3 px-4">Κατάστημα</th>
                           <th className="py-3 px-4">Κατηγορία</th>
                           <th className="py-3 px-4">Πληρωτής</th>
@@ -1515,6 +2588,7 @@
                         {deletedReceipts.map((r) => (
                           <tr key={r.id} className="hover:bg-slate-50 opacity-75 hover:opacity-100 transition">
                             <td className="py-3 px-4 font-mono text-xs text-slate-500 line-through">{r.date}</td>
+                            <td className="py-3 px-4 font-mono text-[10px] text-slate-400">{r.registrationDate || '-'}</td>
                             <td className="py-3 px-4 font-bold text-slate-800">{r.merchant}</td>
                             <td className="py-3 px-4 text-xs text-slate-600">{r.category}</td>
                             <td className="py-3 px-4 text-xs">{r.memberName}</td>
@@ -1545,69 +2619,84 @@
               </section>
             )}
 
-            {/* MANUAL ENTRY & INDIVIDUAL SCAN REVIEW MODAL */}
+            {/* MODAL 1: MANUAL ENTRY & OCR REVIEW CONFIRMATION MODAL */}
             {showFormModal && (
               <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
                 <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 border border-slate-200">
                   <div className="flex items-center justify-between border-b pb-3">
                     <div>
-                      <h3 className="text-base font-bold text-slate-800">
-                        {scanQueue.length > 0 ? `📸 Επιβεβαίωση Απόδειξης (Απομένουν άλλες ${scanQueue.length})` : '📋 Επισκόπηση & Επιβεβαίωση Καταχώρησης'}
+                      <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                        <span>📸</span>
+                        <span>{scanQueue.length > 0 ? `Επιβεβαίωση Απόδειξης (Απομένουν άλλες ${scanQueue.length})` : 'Επισκόπηση & Επιβεβαίωση Καταχώρησης'}</span>
                       </h3>
-                      <p className="text-[11px] text-slate-400">Ελέγξτε και συμπληρώστε τις κατηγορίες πριν την υποβολή</p>
+                      <p className="text-[11px] text-slate-400">Ελέγξτε τα στοιχεία που εξήχθησαν αυτόματα από τη φωτογραφία</p>
                     </div>
                     <button onClick={() => { setShowFormModal(false); setScanQueue([]); }} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
                   </div>
 
                   <form onSubmit={handleCreateManualExpense} className="space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
+                    {/* Dual Dates: Receipt Date from Photo & Registration Timestamp */}
+                    <div className="grid grid-cols-2 gap-3 bg-indigo-50/40 p-3 rounded-2xl border border-indigo-100">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Ημερομηνία</label>
+                        <label className="text-[11px] font-bold text-indigo-900 block mb-1">📅 Ημερομηνία Απόδειξης</label>
                         <input
                           type="text"
                           value={formData.date}
                           onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
-                          placeholder="08/11/26"
+                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold bg-white text-indigo-900"
+                          placeholder="ΗΗ/ΜΜ/ΕΕΕΕ"
+                          required
+                        />
+                        <span className="text-[9px] text-indigo-600">Από τη φωτογραφία</span>
+                      </div>
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-600 block mb-1">⏰ Ημερομηνία Καταχώρησης</label>
+                        <input
+                          type="text"
+                          value={formData.registrationDate}
+                          onChange={(e) => setFormData({ ...formData, registrationDate: e.target.value })}
+                          className="w-full px-3 py-2 border rounded-xl text-xs font-mono bg-slate-100 text-slate-600"
+                          placeholder="Τώρα"
+                        />
+                        <span className="text-[9px] text-slate-400">Σφραγίδα χρόνου</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-700 block mb-1">🏪 Προμηθευτής / Κατάστημα</label>
+                        <input
+                          type="text"
+                          value={formData.merchant}
+                          onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
+                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold text-slate-800"
+                          placeholder="π.χ. AB Vassilopoulos, Lidl, EKO"
                           required
                         />
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Ποσό Σάρωσης (€)</label>
+                        <label className="text-[11px] font-bold text-emerald-700 block mb-1">💶 Συνολικό Ποσό (€)</label>
                         <input
                           type="number"
                           step="0.01"
                           value={formData.total}
                           onChange={(e) => setFormData({ ...formData, total: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-black text-emerald-700 bg-emerald-50/60"
+                          className="w-full px-3 py-2 border border-emerald-300 rounded-xl text-xs font-black text-emerald-700 bg-emerald-50/60"
                           placeholder="0.00"
                           required
                         />
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Κατάστημα / Παραλήπτης</label>
-                        <input
-                          type="text"
-                          value={formData.merchant}
-                          onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
-                          placeholder="π.χ. AB Vassilopoulos"
-                          required
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Υποκατηγορία / Περιγραφή</label>
-                        <input
-                          type="text"
-                          value={formData.subcategory}
-                          onChange={(e) => setFormData({ ...formData, subcategory: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
-                          placeholder="π.χ. Ψώνια εβδομάδας"
-                        />
-                      </div>
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-700 block mb-1">📝 Αγορασθέντα Είδη / Υποκατηγορία</label>
+                      <input
+                        type="text"
+                        value={formData.subcategory}
+                        onChange={(e) => setFormData({ ...formData, subcategory: e.target.value })}
+                        className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
+                        placeholder="π.χ. Γάλα, Ψωμί, Τυρί (εξήχθησαν από OCR)"
+                      />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -1635,7 +2724,7 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Πληρωτής (Μέλος)</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">👤 Πληρωτής (Μέλος)</label>
                         <select
                           value={formData.memberId}
                           onChange={(e) => setFormData({ ...formData, memberId: e.target.value })}
@@ -1645,7 +2734,7 @@
                         </select>
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Τρόπος Πληρωμής</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">💳 Τρόπος Πληρωμής</label>
                         <select
                           value={formData.paymentMethod}
                           onChange={(e) => setFormData({ ...formData, paymentMethod: e.target.value })}
@@ -1671,7 +2760,7 @@
               </div>
             )}
 
-            {/* EDIT ITEM MODAL */}
+            {/* MODAL 2: EDIT RECEIPT MODAL */}
             {editingReceipt && (
               <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
                 <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 border border-slate-200">
@@ -1683,23 +2772,23 @@
                   <form onSubmit={saveEditedReceipt} className="space-y-3">
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Ημερομηνία</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">📅 Ημ. Απόδειξης</label>
                         <input
                           type="text"
                           value={editingReceipt.date}
                           onChange={(e) => setEditingReceipt({ ...editingReceipt, date: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
+                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold"
                           required
                         />
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Ποσό (€)</label>
+                        <label className="text-[11px] font-bold text-emerald-700 block mb-1">💶 Ποσό (€)</label>
                         <input
                           type="number"
                           step="0.01"
                           value={editingReceipt.total}
                           onChange={(e) => setEditingReceipt({ ...editingReceipt, total: parseFloat(e.target.value || 0) })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold"
+                          className="w-full px-3 py-2 border rounded-xl text-xs font-black text-emerald-700"
                           required
                         />
                       </div>
@@ -1707,7 +2796,7 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Κατάστημα / Παραλήπτης</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">🏪 Κατάστημα / Παραλήπτης</label>
                         <input
                           type="text"
                           value={editingReceipt.merchant}
@@ -1717,7 +2806,7 @@
                         />
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Υποκατηγορία / Περιγραφή</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">📝 Υποκατηγορία / Είδη</label>
                         <input
                           type="text"
                           value={editingReceipt.subcategory || ''}
@@ -1730,7 +2819,7 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Κατηγορία</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">🏷️ Κατηγορία</label>
                         <select
                           value={editingReceipt.category}
                           onChange={(e) => setEditingReceipt({ ...editingReceipt, category: e.target.value })}
@@ -1753,7 +2842,7 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Πληρωτής</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">👤 Πληρωτής</label>
                         <select
                           value={editingReceipt.memberId}
                           onChange={(e) => {
@@ -1766,7 +2855,7 @@
                         </select>
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">Τρόπος Πληρωμής</label>
+                        <label className="text-[11px] font-bold text-slate-500 block mb-1">💳 Τρόπος Πληρωμής</label>
                         <input
                           type="text"
                           value={editingReceipt.paymentMethod}
@@ -1782,7 +2871,7 @@
                         onClick={() => deleteReceipt(editingReceipt.id)}
                         className="px-3 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-xl text-xs font-bold"
                       >
-                        🗑️ Ακύρωση / Διαγραφή
+                        🗑️ Διαγραφή
                       </button>
                       <div className="flex gap-2">
                         <button type="button" onClick={() => setEditingReceipt(null)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold">Πίσω</button>
@@ -1794,7 +2883,212 @@
               </div>
             )}
 
-            {/* DELETE / CLEANUP MODAL WITH DATE LIMIT */}
+            {/* MODAL 3: EXCEL IMPORT & DATE FORMAT SELECTOR & RE-IMPORT CLEANUP */}
+            {showExcelImportModal && (
+              <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 border border-slate-200">
+                  <div className="flex items-center justify-between border-b pb-3">
+                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                      <span>📥</span>
+                      <span>Εισαγωγή Αποδείξεων από Excel</span>
+                    </h3>
+                    <button onClick={() => setShowExcelImportModal(false)} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+                  </div>
+
+                  {/* Date Format Selector */}
+                  <div className="space-y-2 bg-indigo-50/50 p-4 rounded-2xl border border-indigo-100">
+                    <label className="text-xs font-bold text-indigo-950 block">
+                      📅 Επιλογή Μορφής Ημερομηνιών στο Excel:
+                    </label>
+                    <p className="text-[11px] text-indigo-700">
+                      Αν οι αποδείξεις σας είχαν εμφανιστεί όλες στον Νοέμβριο, επιλέξτε την κατάλληλη μορφή παρακάτω:
+                    </p>
+                    <div className="space-y-2 pt-1">
+                      <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                        <input
+                          type="radio"
+                          name="dateFormatOption"
+                          value="auto"
+                          checked={excelDateFormat === 'auto'}
+                          onChange={() => setExcelDateFormat('auto')}
+                          className="text-indigo-600"
+                        />
+                        <span>🔄 <strong>Αυτόματη Αναγνώριση</strong> (Έξυπνη διατήρηση έτους & ημερομηνίας)</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                        <input
+                          type="radio"
+                          name="dateFormatOption"
+                          value="dmy"
+                          checked={excelDateFormat === 'dmy'}
+                          onChange={() => setExcelDateFormat('dmy')}
+                          className="text-indigo-600"
+                        />
+                        <span>🇬🇷 <strong>Ημέρα / Μήνας / Έτος</strong> (DD/MM/YYYY - Ευρωπαϊκή μορφή)</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                        <input
+                          type="radio"
+                          name="dateFormatOption"
+                          value="mdy"
+                          checked={excelDateFormat === 'mdy'}
+                          onChange={() => setExcelDateFormat('mdy')}
+                          className="text-indigo-600"
+                        />
+                        <span>🇺🇸 <strong>Μήνας / Ημέρα / Έτος</strong> (MM/DD/YYYY - αν το Excel έχει πρώτα τον Μήνα)</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <button
+                      onClick={() => excelImportRef.current?.click()}
+                      className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition shadow flex items-center justify-center gap-2"
+                    >
+                      <span>📁</span>
+                      <span>Επιλογή Αρχείου Excel</span>
+                    </button>
+                    <button
+                      onClick={downloadTemplate}
+                      className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold border border-slate-200 transition flex items-center justify-center gap-2"
+                    >
+                      <span>📄</span>
+                      <span>Λήψη Προτύπου Excel</span>
+                    </button>
+                  </div>
+
+                  {/* Clean for Re-Import Danger Zone */}
+                  <div className="pt-4 border-t space-y-2">
+                    <h4 className="text-xs font-bold text-rose-800 flex items-center gap-1.5">
+                      <span>🧹</span>
+                      <span>Καθαρισμός & Επανεισαγωγή (Διόρθωση Ημερομηνιών):</span>
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Αν θέλετε να σβήσετε τις αποδείξεις που είχαν λάθος ημερομηνία και να ξανανεβάσετε το Excel σας καθαρά:
+                    </p>
+                    <button
+                      onClick={cleanAllReceiptsForReimport}
+                      className="w-full py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2"
+                    >
+                      <span>⚠️</span>
+                      <span>Καθαρισμός όλων των παλιών δεδομένων για επανεισαγωγή</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* MODAL 4: DASHBOARD PANELS CUSTOMIZE MODAL (SHOW/HIDE WITH LOCALSTORAGE MEMORY) */}
+            {showCustomizeModal && (
+              <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
+                  <div className="flex items-center justify-between border-b pb-3">
+                    <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
+                      <span>⚙️</span>
+                      <span>Προσαρμογή Εμφάνισης Dashboard</span>
+                    </h3>
+                    <button onClick={() => setShowCustomizeModal(false)} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+                  </div>
+
+                  <p className="text-xs text-slate-500">
+                    Επιλέξτε ποια panels θέλετε να εμφανίζονται. Η εφαρμογή αποθηκεύει αυτόματα τις επιλογές σας στη μνήμη.
+                  </p>
+
+                  <div className="space-y-3 pt-1">
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">⏳ Εβδομαδιαίο Όριο & Στόχος Μήνα</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.weeklyAllowance}
+                        onChange={() => toggleWidget('weeklyAllowance')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">🥧 Πίτα Εξόδων ανά Κατηγορία</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.categoryPie}
+                        onChange={() => toggleWidget('categoryPie')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">🎯 Πίτα Εξόδων ανά Δικαιούχο</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.beneficiaryPie}
+                        onChange={() => toggleWidget('beneficiaryPie')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">📊 Προϋπολογισμός vs Απολογισμός</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.budgetVsActual}
+                        onChange={() => toggleWidget('budgetVsActual')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">📈 Εβδομαδιαία Τάση Εξόδων (1-4)</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.weeklyTrend}
+                        onChange={() => toggleWidget('weeklyTrend')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">👨‍👩‍👧‍👦 Πληρωμές ανά Μέλος</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.memberStats}
+                        onChange={() => toggleWidget('memberStats')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">🏷️ Πλέγμα 12 Κατηγοριών</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.categoryGrid}
+                        onChange={() => toggleWidget('categoryGrid')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-indigo-50/50 rounded-xl border border-slate-200 cursor-pointer transition">
+                      <span className="text-xs font-bold text-slate-800">⚡ Μπάρα Γρήγορης Καταχώρησης</span>
+                      <input
+                        type="checkbox"
+                        checked={!!widgets.quickActions}
+                        onChange={() => toggleWidget('quickActions')}
+                        className="w-4 h-4 text-indigo-600 rounded"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="pt-3 border-t flex justify-end">
+                    <button
+                      onClick={() => setShowCustomizeModal(false)}
+                      className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow"
+                    >
+                      Έτοιμο
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* MODAL 5: DELETE / CLEANUP MODAL WITH DATE LIMIT */}
             {showDeleteModal && (
               <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
                 <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
@@ -1898,7 +3192,7 @@
               </div>
             )}
 
-            {/* CUSTOM ALERT / CONFIRM DIALOG MODAL */}
+            {/* MODAL 6: CUSTOM ALERT / CONFIRM DIALOG */}
             {dialogState.isOpen && (
               <div className="fixed inset-0 z-[60] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
                 <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl space-y-4 border border-slate-200">
