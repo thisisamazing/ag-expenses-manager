@@ -471,6 +471,7 @@
       categoryPie: true,
       beneficiaryPie: true,
       budgetVsActual: true,
+      weeklyCategoryBudget: true,
       weeklyTrend: true,
       memberStats: true,
       categoryGrid: true,
@@ -570,11 +571,13 @@
       const [widgets, setWidgets] = useState(() => {
         try {
           const s = localStorage.getItem('family_dashboard_widgets_v1');
-          return s ? JSON.parse(s) : DEFAULT_WIDGETS;
+          return s ? { ...DEFAULT_WIDGETS, ...JSON.parse(s) } : DEFAULT_WIDGETS;
         } catch (e) {
           return DEFAULT_WIDGETS;
         }
       });
+      const [budgetPeriodFilter, setBudgetPeriodFilter] = useState('MTD');
+      const [weeklyCatSelectedWeek, setWeeklyCatSelectedWeek] = useState('all');
 
       const toggleWidget = (key) => {
         setWidgets(prev => {
@@ -2011,19 +2014,44 @@
         };
       }, [beneficiaryBreakdown]);
 
-      // Budget vs Actual Comparison per Category (Resolved categories & descending order)
+      // Budget vs Actual Comparison per Category (Resolved categories, period filter, no Cigarettes, descending order)
       const budgetVsActualCategories = useMemo(() => {
-        const list = CATEGORIES.map(cat => {
+        const now = new Date();
+        const currentDay = now.getDate();
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+
+        let minDay = 1;
+        let maxDay = currentDay;
+        let varFactor = currentDay / daysInMonth;
+
+        if (budgetPeriodFilter === '1-7') { minDay = 1; maxDay = 7; varFactor = 0.25; }
+        else if (budgetPeriodFilter === '8-15') { minDay = 8; maxDay = 15; varFactor = 0.25; }
+        else if (budgetPeriodFilter === '15-23') { minDay = 15; maxDay = 23; varFactor = 0.25; }
+        else if (budgetPeriodFilter === '24-31') { minDay = 24; maxDay = 31; varFactor = 0.25; }
+
+        const periodReceipts = currentMonthReceipts.filter(r => {
+          const p = parseSmartDate(r.date);
+          const d = p.day || 1;
+          return d >= minDay && d <= maxDay;
+        });
+
+        const list = CATEGORIES.filter(cat => cat.id !== 'Cigarettes').map(cat => {
           const matchingFixed = (budgetConfig.fixedExpenses || []).filter(f => {
+            const resolved = resolveCategoryId(f.category);
+            if (resolved !== cat.id && f.category !== cat.id) return false;
+            const expDay = parseInt(f.expectedDay) || 1;
+            return expDay >= minDay && expDay <= maxDay;
+          });
+          const allFixedForCat = (budgetConfig.fixedExpenses || []).some(f => {
             const resolved = resolveCategoryId(f.category);
             return resolved === cat.id || f.category === cat.id;
           });
           const fixedTotal = matchingFixed.reduce((acc, f) => acc + (parseFloat(f.amount) || 0), 0);
-          const isFixed = matchingFixed.length > 0;
-          const budgeted = isFixed ? fixedTotal : (variableBudget / 8);
-          const actual = currentMonthReceipts.filter(r => r.category === cat.id).reduce((acc, r) => acc + r.total, 0);
+          const isFixed = allFixedForCat;
+          const budgeted = isFixed ? fixedTotal : ((variableBudget / 8) * varFactor);
+          const actual = periodReceipts.filter(r => r.category === cat.id).reduce((acc, r) => acc + r.total, 0);
           const diff = budgeted - actual;
-          const percent = budgeted > 0 ? (actual / budgeted) * 100 : 0;
+          const percent = budgeted > 0 ? (actual / budgeted) * 100 : (actual > 0 ? 100 : 0);
           return {
             ...cat,
             budgeted,
@@ -2037,7 +2065,55 @@
 
         // Descending order: highest actual spent first, then highest budgeted
         return list.sort((a, b) => (b.actual - a.actual) || (b.budgeted - a.budgeted));
-      }, [budgetConfig, variableBudget, currentMonthReceipts]);
+      }, [budgetConfig, variableBudget, currentMonthReceipts, budgetPeriodFilter]);
+
+      // Weekly Category Budget vs Actual (Same order & colors as categoryBreakdown)
+      const weeklyCategoryComparison = useMemo(() => {
+        const palette = [
+          '#10b981', '#f59e0b', '#f43f5e', '#14b8a6', '#8b5cf6',
+          '#6366f1', '#22c55e', '#3b82f6', '#ef4444', '#ec4899', '#78716c', '#f97316'
+        ];
+        const weekIdx = weeklyCatSelectedWeek === 'all' ? null : parseInt(weeklyCatSelectedWeek);
+        const varFactor = weekIdx === null ? 1 : 0.25;
+
+        return categoryBreakdown.map((cat, idx) => {
+          const color = palette[idx % palette.length];
+          const allFixedForCat = (budgetConfig.fixedExpenses || []).filter(f => {
+            const resolved = resolveCategoryId(f.category);
+            return resolved === cat.id || f.category === cat.id;
+          });
+          const matchingFixed = allFixedForCat.filter(f => {
+            if (weekIdx === null) return true;
+            const expDay = parseInt(f.expectedDay) || 1;
+            const w = Math.min(3, Math.floor((expDay - 1) / 7));
+            return w === weekIdx;
+          });
+          const fixedTotal = matchingFixed.reduce((acc, f) => acc + (parseFloat(f.amount) || 0), 0);
+          const isFixed = allFixedForCat.length > 0;
+          const budgeted = isFixed ? fixedTotal : ((variableBudget / 8) * varFactor);
+
+          const actual = currentMonthReceipts
+            .filter(r => {
+              if (r.category !== cat.id) return false;
+              if (weekIdx === null) return true;
+              const p = parseSmartDate(r.date);
+              const d = p.day || 1;
+              const w = Math.min(3, Math.floor((d - 1) / 7));
+              return w === weekIdx;
+            })
+            .reduce((acc, r) => acc + r.total, 0);
+
+          const diff = budgeted - actual;
+          return {
+            ...cat,
+            chartColor: color,
+            budgeted,
+            actual,
+            diff,
+            isFixed
+          };
+        });
+      }, [categoryBreakdown, budgetConfig, variableBudget, currentMonthReceipts, weeklyCatSelectedWeek]);
 
       // Budget vs Actual Bar Chart Dataset (Sorted descending)
       const budgetBarData = useMemo(() => {
@@ -2061,7 +2137,7 @@
         };
       }, [budgetVsActualCategories]);
 
-      // Weekly Spending Trend Dataset (Weeks 1 to 4)
+      // Weekly Spending Trend Dataset (Weeks 1 to 4 with Grey Budget Bar)
       const weeklyTrendData = useMemo(() => {
         const weeklySums = [0, 0, 0, 0];
         currentMonthReceipts.forEach(r => {
@@ -2071,19 +2147,37 @@
           weeklySums[w] += r.total;
         });
 
+        const weeklyBudgets = [
+          standardWeeklyAllowance,
+          standardWeeklyAllowance,
+          standardWeeklyAllowance,
+          standardWeeklyAllowance
+        ];
+        (budgetConfig.fixedExpenses || []).forEach(f => {
+          const expDay = parseInt(f.expectedDay) || 1;
+          const w = Math.min(3, Math.floor((expDay - 1) / 7));
+          weeklyBudgets[w] += (parseFloat(f.amount) || 0);
+        });
+
         return {
           labels: ['Εβδομάδα 1 (1-7)', 'Εβδομάδα 2 (8-14)', 'Εβδομάδα 3 (15-21)', 'Εβδομάδα 4 (22+)'],
           datasets: [
             {
+              label: 'Προϋπολογισμός (€)',
+              data: weeklyBudgets.map(v => Math.round(v)),
+              backgroundColor: '#94a3b8',
+              borderRadius: 8
+            },
+            {
               label: 'Έξοδα Εβδομάδας (€)',
-              data: weeklySums,
+              data: weeklySums.map(v => Math.round(v)),
               backgroundColor: '#3b82f6',
               borderRadius: 8
             },
             {
               type: 'line',
-              label: 'Στόχος Εβδομάδας (€)',
-              data: [standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance],
+              label: 'Όριο Μεταβλητών (€)',
+              data: [standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance, standardWeeklyAllowance].map(v => Math.round(v)),
               borderColor: '#ef4444',
               borderWidth: 2,
               borderDash: [5, 5],
@@ -2091,7 +2185,7 @@
             }
           ]
         };
-      }, [currentMonthReceipts, standardWeeklyAllowance]);
+      }, [currentMonthReceipts, standardWeeklyAllowance, budgetConfig]);
 
       const filteredReceipts = useMemo(() => {
         const filtered = activeReceipts.filter((r) => {
@@ -2575,59 +2669,74 @@
                 )}
 
                 {/* 2. BUDGET VS ACTUAL DASHBOARD (BAR CHART & CATEGORY BREAKDOWN TABLE) */}
-                {widgets.budgetVsActual && (
-                  <section className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b pb-3 gap-2">
-                      <div>
-                        <h3 className="font-bold text-base text-slate-800 flex items-center gap-2">
+                {widgets.budgetVsActual && (() => {
+                  const totalBudgeted = budgetVsActualCategories.reduce((acc, c) => acc + c.budgeted, 0);
+                  const totalActual = budgetVsActualCategories.reduce((acc, c) => acc + c.actual, 0);
+                  const totalDiff = totalBudgeted - totalActual;
+                  const totalPercent = totalBudgeted > 0 ? (totalActual / totalBudgeted) * 100 : (totalActual > 0 ? 100 : 0);
+
+                  return (
+                  <section className="bg-white p-4 sm:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                    <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between border-b pb-3 gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-bold text-sm sm:text-base text-slate-800 flex items-center gap-1.5">
                           <span>📊 Προϋπολογισμός vs Απολογισμός ανά Κατηγορία</span>
                           <button onClick={() => toggleWidget('budgetVsActual')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
                         </h3>
-                        <p className="text-xs text-slate-400">Σύγκριση προϋπολογισμένων με πραγματικά έξοδα και υπόλοιπα</p>
+                        <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                          {['MTD', '1-7', '8-15', '15-23', '24-31'].map(period => (
+                            <button
+                              key={period}
+                              onClick={() => setBudgetPeriodFilter(period)}
+                              className={`px-2 py-0.5 rounded-lg text-[10px] sm:text-xs font-bold transition-all ${budgetPeriodFilter === period ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}
+                            >
+                              {period}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-xs px-2.5 py-1 bg-slate-100 text-slate-700 rounded-xl font-bold">
-                          Στόχος: {formatMoney(monthlyTarget)}
+                        <span className="text-[11px] sm:text-xs px-2 py-1 bg-slate-100 text-slate-700 rounded-xl font-bold">
+                          Στόχος: {formatMoney(totalBudgeted)}
                         </span>
-                        <span className="text-xs px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-xl font-bold">
-                          Πραγματικά: {formatMoney(currentMonthTotal)}
+                        <span className="text-[11px] sm:text-xs px-2 py-1 bg-indigo-50 text-indigo-700 rounded-xl font-bold">
+                          Πραγμ.: {formatMoney(totalActual)}
                         </span>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-center">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6 items-start">
                       <div className="lg:col-span-1">
-                        <DynamicChart type="bar" data={budgetBarData} height={270} />
+                        <DynamicChart type="bar" data={budgetBarData} height={260} />
                       </div>
-                      <div className="lg:col-span-2 overflow-x-auto">
-                        <table className="w-full text-left text-xs border-collapse">
+                      <div className="lg:col-span-2 w-full">
+                        <table className="w-full text-left text-[11px] sm:text-xs border-collapse table-fixed">
                           <thead>
-                            <tr className="bg-slate-50 text-slate-500 font-bold border-b text-[11px]">
-                              <th className="py-2.5 px-3">Κατηγορία</th>
-                              <th className="py-2.5 px-3 text-right">Προϋπολογισμός</th>
-                              <th className="py-2.5 px-3 text-right">Πραγματικά</th>
-                              <th className="py-2.5 px-3 text-right">Διαφορά</th>
-                              <th className="py-2.5 px-3">Ποσοστό Κάλυψης</th>
+                            <tr className="bg-slate-50 text-slate-500 font-bold border-b text-[10px] sm:text-[11px]">
+                              <th className="py-2 px-1.5 w-[34%]">Κατηγορία</th>
+                              <th className="py-2 px-1 text-right w-[18%]">Προϋπ.</th>
+                              <th className="py-2 px-1 text-right w-[18%]">Πραγμ.</th>
+                              <th className="py-2 px-1 text-right w-[18%]">Διαφ.</th>
+                              <th className="py-2 px-1 text-right w-[12%]">%</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {budgetVsActualCategories.map(cat => (
                               <tr key={cat.id} className="hover:bg-slate-50">
-                                <td className="py-2 px-3 font-bold text-slate-800 flex items-center gap-1.5">
-                                  <span>{cat.icon}</span>
+                                <td className="py-1.5 px-1.5 font-bold text-slate-800 truncate">
+                                  <span className="mr-1">{cat.icon}</span>
                                   <span>{cat.label.split('/')[0]}</span>
-                                  {cat.isFixed && <span className="px-1.5 py-0.2 rounded text-[9px] bg-purple-100 text-purple-700 font-bold">Πάγιο</span>}
                                 </td>
-                                <td className="py-2 px-3 text-right font-mono text-slate-500">{formatMoney(cat.budgeted)}</td>
-                                <td className="py-2 px-3 text-right font-mono font-bold text-slate-800">{formatMoney(cat.actual)}</td>
-                                <td className={`py-2 px-3 text-right font-mono font-bold ${cat.diff >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                <td className="py-1.5 px-1 text-right font-mono text-slate-500">{formatMoney(cat.budgeted)}</td>
+                                <td className="py-1.5 px-1 text-right font-mono font-bold text-slate-800">{formatMoney(cat.actual)}</td>
+                                <td className={`py-1.5 px-1 text-right font-mono font-bold ${cat.diff >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
                                   {cat.diff >= 0 ? `+${formatMoney(cat.diff)}` : `-${formatMoney(Math.abs(cat.diff))}`}
                                 </td>
-                                <td className="py-2 px-3">
-                                  <div className="flex items-center gap-2">
-                                    <div className="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
+                                <td className="py-1.5 px-1 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <div className="w-10 bg-slate-200 rounded-full h-1.5 overflow-hidden hidden sm:block">
                                       <div
-                                        className={`h-full transition-all ${cat.percent <= 80 ? 'bg-emerald-500' : (cat.percent <= 100 ? 'bg-amber-500' : 'bg-rose-500')}`}
+                                        className={`h-full ${cat.percent <= 80 ? 'bg-emerald-500' : (cat.percent <= 100 ? 'bg-amber-500' : 'bg-rose-500')}`}
                                         style={{ width: `${Math.min(100, cat.percent)}%` }}
                                       ></div>
                                     </div>
@@ -2637,11 +2746,104 @@
                               </tr>
                             ))}
                           </tbody>
+                          <tfoot>
+                            <tr className="bg-slate-100 font-black text-slate-800 border-t-2 border-slate-300 text-[11px] sm:text-xs">
+                              <td className="py-2 px-1.5">Σύνολο</td>
+                              <td className="py-2 px-1 text-right font-mono">{formatMoney(totalBudgeted)}</td>
+                              <td className="py-2 px-1 text-right font-mono">{formatMoney(totalActual)}</td>
+                              <td className={`py-2 px-1 text-right font-mono ${totalDiff >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                {totalDiff >= 0 ? `+${formatMoney(totalDiff)}` : `-${formatMoney(Math.abs(totalDiff))}`}
+                              </td>
+                              <td className="py-2 px-1 text-right font-mono">{totalPercent.toFixed(0)}%</td>
+                            </tr>
+                          </tfoot>
                         </table>
                       </div>
                     </div>
                   </section>
-                )}
+                  );
+                })()}
+
+                {/* 2B. WEEKLY BUDGET VS ACTUAL PER CATEGORY (SAME ORDER & COLORS AS CATEGORY CHART) */}
+                {widgets.weeklyCategoryBudget && (() => {
+                  const totalWBudget = weeklyCategoryComparison.reduce((acc, c) => acc + c.budgeted, 0);
+                  const totalWActual = weeklyCategoryComparison.reduce((acc, c) => acc + c.actual, 0);
+                  const totalWDiff = totalWBudget - totalWActual;
+
+                  return (
+                  <section className="bg-white p-4 sm:p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+                    <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between border-b pb-3 gap-2">
+                      <div>
+                        <h3 className="font-bold text-sm sm:text-base text-slate-800 flex items-center gap-2">
+                          <span>📅 Προϋπολογισμός vs Απολογισμός ανά Εβδομάδα & Κατηγορία</span>
+                          <button onClick={() => toggleWidget('weeklyCategoryBudget')} className="text-xs text-slate-400 hover:text-indigo-600" title="Απόκρυψη">👁️</button>
+                        </h3>
+                        <p className="text-xs text-slate-400">Ίδια ταξινόμηση & χρώματα με το γράφημα εξόδων • Πράσινο: Εξοικονόμηση | Κόκκινο: Υπέρβαση</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl">
+                        {[
+                          { id: 'all', label: 'Όλες (1-4)' },
+                          { id: '0', label: 'Εβδ. 1 (1-7)' },
+                          { id: '1', label: 'Εβδ. 2 (8-14)' },
+                          { id: '2', label: 'Εβδ. 3 (15-21)' },
+                          { id: '3', label: 'Εβδ. 4 (22+)' }
+                        ].map(w => (
+                          <button
+                            key={w.id}
+                            onClick={() => setWeeklyCatSelectedWeek(w.id)}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] sm:text-xs font-bold transition-all ${weeklyCatSelectedWeek === w.id ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'}`}
+                          >
+                            {w.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 text-slate-500 font-bold border-b text-[11px]">
+                            <th className="py-2 px-2">Κατηγορία (Φθίνουσα)</th>
+                            <th className="py-2 px-2 text-right">Προϋπολογισμός</th>
+                            <th className="py-2 px-2 text-right">Απολογισμός</th>
+                            <th className="py-2 px-2 text-right">Εξοικονόμηση / Υπέρβαση</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {weeklyCategoryComparison.map(cat => (
+                            <tr key={cat.id} className="hover:bg-slate-50">
+                              <td className="py-2 px-2 font-bold text-slate-800 flex items-center gap-2">
+                                <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cat.chartColor }}></span>
+                                <span>{cat.icon}</span>
+                                <span>{cat.label.split('/')[0]}</span>
+                              </td>
+                              <td className="py-2 px-2 text-right font-mono text-slate-500">{formatMoney(cat.budgeted)}</td>
+                              <td className="py-2 px-2 text-right font-mono font-bold text-slate-800">{formatMoney(cat.actual)}</td>
+                              <td className="py-2 px-2 text-right font-mono font-bold">
+                                <span className={`px-2 py-0.5 rounded-lg ${cat.diff >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                                  {cat.diff >= 0 ? `+${formatMoney(cat.diff)} (Εξοικονόμηση)` : `-${formatMoney(Math.abs(cat.diff))} (Υπέρβαση)`}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-slate-100 font-black text-slate-800 border-t-2 border-slate-300 text-xs">
+                            <td className="py-2.5 px-2">Σύνολο</td>
+                            <td className="py-2.5 px-2 text-right font-mono">{formatMoney(totalWBudget)}</td>
+                            <td className="py-2.5 px-2 text-right font-mono">{formatMoney(totalWActual)}</td>
+                            <td className="py-2.5 px-2 text-right font-mono">
+                              <span className={`px-2 py-0.5 rounded-lg ${totalWDiff >= 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                                {totalWDiff >= 0 ? `+${formatMoney(totalWDiff)}` : `-${formatMoney(Math.abs(totalWDiff))}`}
+                              </span>
+                            </td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </section>
+                  );
+                })()}
 
                 {/* 3. WEEKLY SPENDING TRAJECTORY & FAMILY MEMBERS */}
                 {(widgets.weeklyTrend || widgets.memberStats) && (
