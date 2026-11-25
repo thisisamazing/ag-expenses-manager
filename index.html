@@ -605,6 +605,12 @@
       });
       const [showAiModal, setShowAiModal] = useState(false);
 
+      // Voice-Guided Step-by-Step Form State
+      const [isVoiceActive, setIsVoiceActive] = useState(false);
+      const [activeVoiceIndex, setActiveVoiceIndex] = useState(0);
+      const [voiceFeedback, setVoiceFeedback] = useState('');
+      const recognitionRef = useRef(null);
+
       // Fixed Expense Input Fields for Budget Manager
       const [newFixedTitle, setNewFixedTitle] = useState('');
       const [newFixedAmount, setNewFixedAmount] = useState('');
@@ -1425,52 +1431,288 @@
         XLSX.writeFile(wb, `Family_Expenses_${new Date().toISOString().slice(0, 10)}.xlsx`);
       };
 
-      const handleVoiceInput = () => {
+      const VOICE_INPUT_STEPS = [
+        { key: 'date', label: 'Ημερομηνία Απόδειξης', icon: '📅', isList: false, hint: 'Πείτε ημερομηνία, π.χ. "Σήμερα", "Χθες", ή "15 Νοεμβρίου"' },
+        { key: 'merchant', label: 'Προμηθευτής / Κατάστημα', icon: '🏪', isList: false, hint: 'Πείτε το κατάστημα, π.χ. "Σκλαβενίτης", "Lidl", "EKO"' },
+        { key: 'total', label: 'Συνολικό Ποσό (€)', icon: '💶', isList: false, hint: 'Πείτε το ποσό σε ευρώ, π.χ. "45 ευρώ" ή "12 κόμμα 50"' },
+        { key: 'subcategory', label: 'Αγορασθέντα Είδη', icon: '📝', isList: false, hint: 'Πείτε τα είδη, π.χ. "Γάλα, Ψωμί" ή "Βενζίνη"' },
+        { key: 'category', label: 'Κατηγορία Εξόδου', icon: '🏷️', isList: true, hint: 'Πείτε ή πατήστε την κατηγορία από τη λίστα' },
+        { key: 'beneficiary', label: 'Ποιον αφορά;', icon: '🎯', isList: true, hint: 'Πείτε ή πατήστε ποιον αφορά από τη λίστα' },
+        { key: 'memberId', label: 'Πληρωτής (Μέλος)', icon: '👤', isList: true, hint: 'Πείτε ή πατήστε ποιο μέλος πλήρωσε' },
+        { key: 'paymentMethod', label: 'Τρόπος Πληρωμής', icon: '💳', isList: true, hint: 'Πείτε ή πατήστε τον τρόπο πληρωμής' }
+      ];
+
+      const parseGreekSpokenAmount = (text) => {
+        if (!text) return '';
+        let s = String(text).toLowerCase()
+          .replace(/ευρω|ευρώ|euro|euros/g, '')
+          .replace(/και/g, ' ')
+          .replace(/κόμμα|κομμα|κόμα|κομα|τελεία|τελεια/g, '.')
+          .trim();
+
+        const digitMatch = s.match(/(\d+(?:[.,]\d+)?)/);
+        if (digitMatch) {
+          return digitMatch[1].replace(',', '.');
+        }
+
+        const GREEK_WORDS = {
+          'μηδέν': 0, 'μηδεν': 0,
+          'ένα': 1, 'ενα': 1, 'μια': 1, 'μία': 1,
+          'δύο': 2, 'δυο': 2,
+          'τρία': 3, 'τρια': 3, 'τρεις': 3,
+          'τέσσερα': 4, 'τεσσερα': 4, 'τέσσερις': 4,
+          'πέντε': 5, 'πεντε': 5,
+          'έξι': 6, 'εξι': 6,
+          'επτά': 7, 'επτα': 7, 'εφτά': 7,
+          'οκτώ': 8, 'οκτω': 8, 'οχτώ': 8,
+          'εννέα': 9, 'εννεα': 9, 'εννιά': 9,
+          'δέκα': 10, 'δεκα': 10,
+          'έντεκα': 11, 'εντεκα': 11,
+          'δώδεκα': 12, 'δωδεκα': 12,
+          'δεκατρία': 13, 'δεκατρια': 13,
+          'δεκατέσσερα': 14, 'δεκατεσσερα': 14,
+          'δεκαπέντε': 15, 'δεκαπεντε': 15,
+          'δεκαέξι': 16, 'δεκαεξι': 16,
+          'δεκαεπτά': 17, 'δεκαεφτά': 17,
+          'δεκαοκτώ': 18, 'δεκαοχτώ': 18,
+          'δεκαεννέα': 19, 'δεκαεννιά': 19,
+          'είκοσι': 20, 'εικοσι': 20,
+          'τριάντα': 30, 'τριαντα': 30,
+          'σαράντα': 40, 'σαραντα': 40,
+          'πενήντα': 50, 'πενηντα': 50,
+          'εξήντα': 60, 'εξηντα': 60,
+          'εβδομήντα': 70, 'εβδομηντα': 70,
+          'ογδόντα': 80, 'ογδοντα': 80,
+          'ενενήντα': 90, 'ενενηντα': 90,
+          'εκατό': 100, 'εκατο': 100, 'εκατόν': 100,
+          'διακόσια': 200, 'διακοσια': 200,
+          'τριακόσια': 300, 'τριακοσια': 300,
+          'τετρακόσια': 400, 'τετρακοσια': 400,
+          'πεντακόσια': 500, 'πεντακοσια': 500,
+          'χίλια': 1000, 'χιλια': 1000
+        };
+
+        const words = s.split(/\s+/);
+        let totalNum = 0;
+        let currentGroup = 0;
+        let found = false;
+
+        for (const w of words) {
+          if (GREEK_WORDS[w] !== undefined) {
+            found = true;
+            const val = GREEK_WORDS[w];
+            if (val === 1000) {
+              totalNum += (currentGroup || 1) * 1000;
+              currentGroup = 0;
+            } else {
+              currentGroup += val;
+            }
+          }
+        }
+        totalNum += currentGroup;
+        return found && totalNum > 0 ? String(totalNum) : '';
+      };
+
+      const parseGreekSpokenDate = (text) => {
+        if (!text) return getTodayFormatted();
+        const s = String(text).toLowerCase().trim();
+        if (s.includes('σήμερα') || s.includes('σημερα')) return getTodayFormatted();
+        if (s.includes('χθες') || s.includes('εχθές') || s.includes('εχθες')) {
+          const y = new Date();
+          y.setDate(y.getDate() - 1);
+          const dd = String(y.getDate()).padStart(2, '0');
+          const mm = String(y.getMonth() + 1).padStart(2, '0');
+          return `${dd}/${mm}/${y.getFullYear()}`;
+        }
+
+        const GREEK_MONTHS = {
+          'ιανουαρι': 1, 'φεβρουαρι': 2, 'μαρτι': 3, 'απριλι': 4, 'μαϊ': 5, 'μαι': 5,
+          'ιουνι': 6, 'ιουλι': 7, 'αυγουστ': 8, 'σεπτεμβρ': 9, 'οκτωβρ': 10, 'νοεμβρ': 11, 'δεκεμβρ': 12
+        };
+
+        for (const [mName, mNum] of Object.entries(GREEK_MONTHS)) {
+          if (s.includes(mName)) {
+            const dayMatch = s.match(/\b([1-9]|[12][0-9]|3[01])\b/);
+            const day = dayMatch ? dayMatch[1].padStart(2, '0') : '01';
+            const year = new Date().getFullYear();
+            return `${day}/${String(mNum).padStart(2, '0')}/${year}`;
+          }
+        }
+
+        const p = parseSmartDate(text);
+        return p.dateStr || getTodayFormatted();
+      };
+
+      const stopVoice = () => {
+        if (recognitionRef.current) {
+          try { recognitionRef.current.abort(); } catch (e) {}
+          recognitionRef.current = null;
+        }
+        setIsListening(false);
+      };
+
+      const startListeningForStep = (stepIdx) => {
+        stopVoice();
+
         if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-          showAlert('Η φωνητική αναγνώριση δεν υποστηρίζεται στο πρόγραμμα περιήγησής σας.');
+          showAlert('Η φωνητική αναγνώριση δεν υποστηρίζεται στο πρόγραμμα περιήγησής σας. Χρησιμοποιήστε Chrome ή Edge.');
           return;
         }
 
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        const recognition = new SpeechRecognition();
-        recognition.lang = 'el-GR';
+        const step = VOICE_INPUT_STEPS[stepIdx];
+        if (!step) return;
 
+        setActiveVoiceIndex(stepIdx);
+        setIsVoiceActive(true);
         setIsListening(true);
-        recognition.start();
+        setVoiceFeedback(`🎙️ Ακούω για: "${step.label}"...`);
 
-        recognition.onresult = (event) => {
-          const transcript = event.results[0][0].transcript;
+        try {
+          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          const recognition = new SpeechRecognition();
+          recognition.lang = 'el-GR';
+          recognition.continuous = false;
+          recognition.interimResults = false;
+          recognition.maxAlternatives = 1;
+
+          recognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript.trim();
+            setIsListening(false);
+            const low = transcript.toLowerCase();
+
+            if (step.key === 'date') {
+              const detectedDate = parseGreekSpokenDate(transcript);
+              setFormData(prev => ({ ...prev, date: detectedDate }));
+              setVoiceFeedback(`✅ Ημερομηνία: ${detectedDate} (Ακούστηκε: "${transcript}")`);
+            } else if (step.key === 'merchant') {
+              const cleanMerchant = transcript.charAt(0).toUpperCase() + transcript.slice(1);
+              setFormData(prev => ({ ...prev, merchant: cleanMerchant }));
+              setVoiceFeedback(`✅ Κατάστημα: "${cleanMerchant}"`);
+            } else if (step.key === 'total') {
+              const numVal = parseGreekSpokenAmount(transcript);
+              if (numVal) {
+                setFormData(prev => ({ ...prev, total: numVal }));
+                setVoiceFeedback(`✅ Ποσό: ${numVal} € (Ακούστηκε: "${transcript}")`);
+              } else {
+                setFormData(prev => ({ ...prev, total: transcript }));
+                setVoiceFeedback(`⚠️ Ακούστηκε: "${transcript}". Ελέγξτε το ποσό ή πατήστε "Ξαναπέστο".`);
+              }
+            } else if (step.key === 'subcategory') {
+              setFormData(prev => ({ ...prev, subcategory: transcript }));
+              setVoiceFeedback(`✅ Είδη: "${transcript}"`);
+            } else if (step.key === 'category') {
+              const resolvedCat = resolveCategoryId(transcript);
+              const catObj = CATEGORIES.find(c => c.id === resolvedCat);
+              setFormData(prev => ({ ...prev, category: resolvedCat }));
+              setVoiceFeedback(`✅ Κατηγορία: ${catObj?.label.split('/')[0] || resolvedCat}`);
+            } else if (step.key === 'beneficiary') {
+              let matchedBen = 'Όλη η Οικογένεια';
+              if (low.includes('κοριτσ') || low.includes('παιδι') || low.includes('αγγελικη και χριστινα')) {
+                matchedBen = 'Κορίτσια (Αγγελική & Χριστίνα 50-50)';
+              } else if (low.includes('νικο')) {
+                matchedBen = 'Νίκος';
+              } else if (low.includes('ανθη') || low.includes('ανθή')) {
+                matchedBen = 'Ανθή';
+              } else if (low.includes('θεοδωρ') || low.includes('θεοδώρα')) {
+                matchedBen = 'Θεοδώρα';
+              } else if (low.includes('αγγελικ')) {
+                matchedBen = 'Αγγελική';
+              } else if (low.includes('χριστιν')) {
+                matchedBen = 'Χριστίνα';
+              }
+              setFormData(prev => ({ ...prev, beneficiary: matchedBen }));
+              setVoiceFeedback(`✅ Δικαιούχος: ${matchedBen}`);
+            } else if (step.key === 'memberId') {
+              let matchedMember = 'nikos';
+              if (low.includes('ανθη') || low.includes('ανθή')) matchedMember = 'anthi';
+              else if (low.includes('θεοδωρ')) matchedMember = 'theodora';
+              else if (low.includes('αγγελικ')) matchedMember = 'aggeliki';
+              else if (low.includes('χριστιν')) matchedMember = 'christina';
+              const mObj = members.find(m => m.id === matchedMember);
+              setFormData(prev => ({ ...prev, memberId: matchedMember }));
+              setVoiceFeedback(`✅ Πληρωτής: ${mObj?.name || matchedMember}`);
+            } else if (step.key === 'paymentMethod') {
+              let matchedPm = 'Card';
+              if (low.includes('μετρητα') || low.includes('μετρητά') || low.includes('cash')) matchedPm = 'Μετρητά';
+              else if (low.includes('παγια') || low.includes('πάγια')) matchedPm = 'Πάγια';
+              else if (low.includes('καταθεση') || low.includes('κατάθεση') || low.includes('τραπεζα') || low.includes('transfer')) matchedPm = 'Bank Transfer';
+              setFormData(prev => ({ ...prev, paymentMethod: matchedPm }));
+              setVoiceFeedback(`✅ Τρόπος: ${matchedPm}`);
+            }
+          };
+
+          recognition.onerror = (event) => {
+            console.warn("Speech recognition notice:", event.error);
+            setIsListening(false);
+            if (event.error === 'no-speech') {
+              setVoiceFeedback('⚠️ Δεν ανιχνεύθηκε ομιλία. Πατήστε "Ξαναπέστο" για να ξαναμιλήσετε.');
+            } else {
+              setVoiceFeedback(`⚠️ Αναμονή φωνής: Πατήστε "Ξαναπέστο" ή συμπληρώστε με πληκτρολόγιο.`);
+            }
+          };
+
+          recognition.onend = () => {
+            setIsListening(false);
+          };
+
+          recognitionRef.current = recognition;
+          recognition.start();
+        } catch (err) {
+          console.error("Speech start error:", err);
           setIsListening(false);
+          setVoiceFeedback('⚠️ Πρόβλημα εκκίνησης μικροφώνου. Ελέγξτε τα δικαιώματα του browser.');
+        }
+      };
 
-          let detectedBen = 'Όλη η Οικογένεια';
-          if (transcript.toLowerCase().includes('κορίτσια')) {
-            detectedBen = 'Κορίτσια (Αγγελική & Χριστίνα 50-50)';
-          }
+      const handleVoiceInput = () => {
+        setFormData({
+          date: getTodayFormatted(),
+          registrationDate: getNowDateTimeFormatted(),
+          merchant: '',
+          subcategory: '',
+          category: 'Supermarket',
+          memberId: selectedMember,
+          beneficiary: 'Όλη η Οικογένεια',
+          total: '',
+          paymentMethod: 'Card',
+          notes: ''
+        });
+        setIsVoiceActive(true);
+        setActiveVoiceIndex(0);
+        setShowFormModal(true);
+        setTimeout(() => {
+          startListeningForStep(0);
+        }, 300);
+      };
 
-          setFormData({
-            date: getTodayFormatted(),
-            merchant: transcript,
-            subcategory: 'Φωνητική Εγγραφή',
-            category: 'Uncategorized',
-            memberId: selectedMember,
-            beneficiary: detectedBen,
-            total: '',
-            paymentMethod: 'Μετρητά',
-            notes: `Φωνητικό: ${transcript}`
-          });
-          setShowFormModal(true);
-        };
+      const handleVoiceRetry = () => {
+        const step = VOICE_INPUT_STEPS[activeVoiceIndex];
+        if (step) {
+          setFormData(prev => ({ ...prev, [step.key]: '' }));
+          startListeningForStep(activeVoiceIndex);
+        }
+      };
 
-        recognition.onerror = () => setIsListening(false);
-        recognition.onend = () => setIsListening(false);
+      const handleVoiceNext = () => {
+        if (activeVoiceIndex < VOICE_INPUT_STEPS.length - 1) {
+          const nextIdx = activeVoiceIndex + 1;
+          setActiveVoiceIndex(nextIdx);
+          startListeningForStep(nextIdx);
+        } else {
+          stopVoice();
+          setVoiceFeedback('🎉 Όλα τα πεδία ολοκληρώθηκαν! Πατήστε "Υποβολή & Καταχώρηση" για αποθήκευση.');
+        }
       };
 
       const openQuickExpenseModal = (category, defaultName, defaultSubcat, defaultAmount, defaultBeneficiary = 'Όλη η Οικογένεια') => {
+        stopVoice();
+        setIsVoiceActive(false);
         setFormData({
           date: getTodayFormatted(),
-          merchant: defaultName,
-          subcategory: defaultSubcat,
-          category: category,
+          registrationDate: getNowDateTimeFormatted(),
+          merchant: defaultName || '',
+          subcategory: defaultSubcat || '',
+          category: category || 'Supermarket',
           memberId: selectedMember,
           beneficiary: defaultBeneficiary || 'Όλη η Οικογένεια',
           total: defaultAmount ? defaultAmount.toString() : '',
@@ -1481,22 +1723,28 @@
       };
 
       const handleCreateManualExpense = (e) => {
-        e.preventDefault();
+        if (e && e.preventDefault) e.preventDefault();
+        stopVoice();
+        setIsVoiceActive(false);
+
         const mObj = members.find(m => m.id === formData.memberId) || members[0];
+        const parsedTotal = parseFloat(String(formData.total || 0).replace(',', '.')) || 0;
+
         const newRec = {
-          id: `rec_manual_${Date.now()}`,
-          merchant: formData.merchant || 'Χειροκίνητη Εγγραφή',
-          subcategory: formData.subcategory,
+          id: `rec_manual_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+          merchant: (formData.merchant || '').trim() || 'Χειροκίνητη Εγγραφή',
+          subcategory: (formData.subcategory || '').trim() || 'Αγορά προϊόντων',
           date: formData.date || getTodayFormatted(),
-          category: formData.category,
+          registrationDate: formData.registrationDate || getNowDateTimeFormatted(),
+          category: formData.category || 'Supermarket',
           memberId: mObj.id,
           memberName: mObj.name,
           beneficiary: formData.beneficiary || 'Όλη η Οικογένεια',
-          total: parseFloat(formData.total || 0),
-          paymentMethod: formData.paymentMethod,
-          notes: formData.notes
+          total: parsedTotal,
+          paymentMethod: formData.paymentMethod || 'Card',
+          notes: formData.notes || (isVoiceActive ? 'Φωνητική καταχώρηση' : '')
         };
-        
+
         saveReceipt(newRec);
         setShowFormModal(false);
 
@@ -1508,6 +1756,7 @@
         } else {
           setFormData({
             date: getTodayFormatted(),
+            registrationDate: getNowDateTimeFormatted(),
             merchant: '',
             subcategory: '',
             category: 'Supermarket',
@@ -1518,6 +1767,7 @@
             notes: ''
           });
         }
+        showAlert(`🎉 Επιτυχία! Η απόδειξη "${newRec.merchant}" (${formatMoney(newRec.total)}) καταχωρήθηκε.`);
       };
 
       const handleFileUpload = (e) => {
@@ -2092,43 +2342,30 @@
                   ))}
                 </div>
 
-                {/* Quick Action Preset Buttons */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2.5">
-                  <button onClick={() => openQuickExpenseModal('Supermarket', 'AB Vassilopoulos', 'Ψώνια', 45.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left hover:bg-emerald-100 transition">
-                    <span className="text-base block">🛒</span>
-                    <span className="text-xs font-bold text-emerald-900 block truncate">Supermarket</span>
-                    <span className="text-[10px] text-emerald-600 block">€45 - Προεπισκόπηση</span>
-                  </button>
-
-                  <button onClick={() => openQuickExpenseModal('Shopping & Gifts', 'Zara / Ρούχα', 'Μπλούζες', 60.00, 'Κορίτσια (Αγγελική & Χριστίνα 50-50)')} className="p-2.5 bg-pink-50 border border-pink-200 rounded-2xl text-left hover:bg-pink-100 transition">
-                    <span className="text-base block">👭</span>
-                    <span className="text-xs font-bold text-pink-900 block truncate">Ρούχα Κορίτσια</span>
-                    <span className="text-[10px] text-pink-600 block">€60 - Προεπισκόπηση</span>
-                  </button>
-
-                  <button onClick={() => openQuickExpenseModal('Fuel & Transport', 'EKO Gas', 'Βενζίνη', 50.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-amber-50 border border-amber-200 rounded-2xl text-left hover:bg-amber-100 transition">
-                    <span className="text-base block">⛽</span>
-                    <span className="text-xs font-bold text-amber-900 block truncate">Βενζίνη</span>
-                    <span className="text-[10px] text-amber-600 block">€50 - Προεπισκόπηση</span>
-                  </button>
-
-                  <button onClick={() => openQuickExpenseModal('Education & Hobbies', 'Φροντιστήριο', 'Δίδακτρα', 80.00, 'Θεοδώρα')} className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-2xl text-left hover:bg-indigo-100 transition">
-                    <span className="text-base block">📚</span>
-                    <span className="text-xs font-bold text-indigo-900 block truncate">Φροντιστήριο</span>
-                    <span className="text-[10px] text-indigo-600 block">€80 - Θεοδώρα</span>
-                  </button>
-
-                  <button onClick={() => openQuickExpenseModal('Loans & Tax', 'Δάνεια - Εφορία', 'Δόση', 120.00, 'Όλη η Οικογένεια')} className="p-2.5 bg-red-50 border border-red-200 rounded-2xl text-left hover:bg-red-100 transition">
-                    <span className="text-base block">🏦</span>
-                    <span className="text-xs font-bold text-red-900 block truncate">Δάνεια/Εφορία</span>
-                    <span className="text-[10px] text-red-600 block">€120 - Προεπισκόπηση</span>
-                  </button>
-
-                  <button onClick={() => openQuickExpenseModal('Cigarettes', 'Περίπτερο', 'Τσιγάρα', 4.60, 'Νίκος')} className="p-2.5 bg-stone-50 border border-stone-200 rounded-2xl text-left hover:bg-stone-100 transition">
-                    <span className="text-base block">🚬</span>
-                    <span className="text-xs font-bold text-stone-900 block truncate">Τσιγάρα</span>
-                    <span className="text-[10px] text-stone-600 block">€4.60 - Νίκος</span>
-                  </button>
+                {/* Quick Action Preset Buttons - All 10-11 Categories in Compact Layout */}
+                <div className="space-y-1.5">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                    ⚡ Γρήγορη Καταχώρηση ανά Κατηγορία (10 Κατηγορίες):
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                    {CATEGORIES.filter(c => c.id !== 'Uncategorized').map(cat => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => openQuickExpenseModal(cat.id, cat.label.split('/')[0], '', '', 'Όλη η Οικογένεια')}
+                        className={`p-2 rounded-xl border text-left transition-all hover:scale-[1.02] hover:shadow-sm flex items-center gap-2 ${cat.color || 'bg-slate-50 border-slate-200'}`}
+                        title={`Γρήγορη καταχώρηση: ${cat.label}`}
+                      >
+                        <span className="text-base flex-shrink-0">{cat.icon}</span>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-extrabold text-[11px] text-slate-800 block truncate leading-tight">
+                            {cat.label.split('/')[0]}
+                          </span>
+                          <span className="text-[9px] opacity-75 block truncate">Φόρμα</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Real OCR Photo Upload Options */}
@@ -2997,35 +3234,267 @@
               </section>
             )}
 
-            {/* MODAL 1: MANUAL ENTRY & OCR REVIEW CONFIRMATION MODAL */}
+            {/* MODAL 1: MANUAL ENTRY & OCR / VOICE REVIEW CONFIRMATION MODAL */}
             {showFormModal && (
-              <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-                <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 border border-slate-200">
+              <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+                <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 border border-slate-200 my-auto">
                   <div className="flex items-center justify-between border-b pb-3">
                     <div>
                       <h3 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                        <span>📸</span>
-                        <span>{scanQueue.length > 0 ? `Επιβεβαίωση Απόδειξης (Απομένουν άλλες ${scanQueue.length})` : 'Επισκόπηση & Επιβεβαίωση Καταχώρησης'}</span>
+                        <span>{isVoiceActive ? '🎙️' : '📸'}</span>
+                        <span>
+                          {isVoiceActive
+                            ? 'Φωνητική Καταχώρηση Απόδειξης'
+                            : (scanQueue.length > 0 ? `Επιβεβαίωση Απόδειξης (Απομένουν άλλες ${scanQueue.length})` : 'Επισκόπηση & Επιβεβαίωση Καταχώρησης')}
+                        </span>
                       </h3>
-                      <p className="text-[11px] text-slate-400">Ελέγξτε τα στοιχεία που εξήχθησαν αυτόματα από τη φωτογραφία</p>
+                      <p className="text-[11px] text-slate-400">
+                        {isVoiceActive
+                          ? 'Μιλήστε για κάθε πεδίο με τη σειρά ή πατήστε "Ξαναπέστο" / "Επόμενο"'
+                          : 'Ελέγξτε τα στοιχεία που εξήχθησαν αυτόματα ή συμπληρώστε χειροκίνητα'}
+                      </p>
                     </div>
-                    <button onClick={() => { setShowFormModal(false); setScanQueue([]); }} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        stopVoice();
+                        setIsVoiceActive(false);
+                        setShowFormModal(false);
+                        setScanQueue([]);
+                      }}
+                      className="text-slate-400 hover:text-slate-600 font-bold text-lg p-1"
+                    >
+                      ✕
+                    </button>
                   </div>
+
+                  {/* VOICE ASSISTANT CONTROL BAR (With 🔄 Ξαναπέστο & ➡️ Επόμενο) */}
+                  {isVoiceActive && (
+                    <div className="bg-gradient-to-r from-indigo-900 via-indigo-800 to-purple-900 text-white p-4 rounded-2xl shadow-lg space-y-3 border border-indigo-400/40">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-3 h-3 rounded-full ${isListening ? 'bg-red-500 animate-ping' : 'bg-emerald-400'}`}></span>
+                          <span className="font-extrabold text-[11px] tracking-wider uppercase text-indigo-200">
+                            Ενεργό Βήμα ({activeVoiceIndex + 1}/{VOICE_INPUT_STEPS.length}):
+                          </span>
+                          <span className="font-black text-xs text-white bg-white/20 px-2 py-0.5 rounded-lg border border-white/20">
+                            {VOICE_INPUT_STEPS[activeVoiceIndex].icon} {VOICE_INPUT_STEPS[activeVoiceIndex].label}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            stopVoice();
+                            setIsVoiceActive(false);
+                          }}
+                          className="text-[10px] text-indigo-300 hover:text-white underline font-semibold"
+                        >
+                          ✕ Διακοπή Φωνής
+                        </button>
+                      </div>
+
+                      {/* Live Feedback / Transcript */}
+                      <div className="bg-black/40 p-2.5 rounded-xl border border-white/10 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2 truncate flex-1">
+                          <span className="text-base animate-pulse flex-shrink-0">{isListening ? '🎙️' : '👂'}</span>
+                          <span className="text-indigo-100 font-medium truncate">
+                            {voiceFeedback || VOICE_INPUT_STEPS[activeVoiceIndex].hint}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-indigo-300 font-mono ml-2 flex-shrink-0">
+                          {isListening ? '🔴 Ακούω...' : '⏸️ Σε αναμονή'}
+                        </span>
+                      </div>
+
+                      {/* THE 2 REQUESTED ACTION BUTTONS: 🔄 Ξαναπέστο & ➡️ Επόμενο */}
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleVoiceRetry}
+                          className="py-2.5 px-3 bg-amber-500 hover:bg-amber-600 text-slate-900 font-black text-xs rounded-xl shadow-md transition flex items-center justify-center gap-1.5 active:scale-95"
+                          title="Διαγραφή και επανεγγραφή του ενεργού πεδίου"
+                        >
+                          <span>🔄</span>
+                          <span>Ξαναπέστο</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleVoiceNext}
+                          className="py-2.5 px-3 bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs rounded-xl shadow-md transition flex items-center justify-center gap-1.5 active:scale-95"
+                          title="Μετάβαση στο επόμενο ενεργό πεδίο"
+                        >
+                          <span>Επόμενο</span>
+                          <span>➡️</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* INTERACTIVE LIST POPUP (Category, Beneficiary, Member, Payment Method) */}
+                  {isVoiceActive && VOICE_INPUT_STEPS[activeVoiceIndex].isList && (
+                    <div className="bg-indigo-50 border-2 border-indigo-400 p-4 rounded-2xl shadow-md space-y-3">
+                      <div className="flex items-center justify-between border-b border-indigo-200 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xl">{VOICE_INPUT_STEPS[activeVoiceIndex].icon}</span>
+                          <div>
+                            <h4 className="font-black text-xs text-indigo-950 uppercase tracking-wide">
+                              Επιλογή για: {VOICE_INPUT_STEPS[activeVoiceIndex].label}
+                            </h4>
+                            <p className="text-[10px] text-indigo-700 font-medium">
+                              🎙️ Πείτε το όνομα με τη φωνή σας ή πατήστε μία επιλογή παρακάτω:
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleVoiceNext}
+                          className="text-[11px] bg-white border border-indigo-200 hover:bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-lg font-bold transition"
+                        >
+                          Επόμενο ➡️
+                        </button>
+                      </div>
+
+                      {/* 1. Category Options */}
+                      {VOICE_INPUT_STEPS[activeVoiceIndex].key === 'category' && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-48 overflow-y-auto p-1">
+                          {CATEGORIES.map(cat => {
+                            const isSelected = formData.category === cat.id;
+                            return (
+                              <button
+                                key={cat.id}
+                                type="button"
+                                onClick={() => {
+                                  setFormData(prev => ({ ...prev, category: cat.id }));
+                                  setVoiceFeedback(`✅ Επιλέχθηκε: ${cat.label.split('/')[0]}`);
+                                }}
+                                className={`p-2 rounded-xl border text-left transition flex items-center gap-1.5 ${isSelected ? 'ring-2 ring-indigo-600 bg-white border-indigo-500 font-black shadow-sm' : 'bg-white/80 border-slate-200 hover:bg-white text-slate-700'}`}
+                              >
+                                <span className="text-base">{cat.icon}</span>
+                                <span className="text-[11px] truncate flex-1">{cat.label.split('/')[0]}</span>
+                                {isSelected && <span className="text-indigo-600 font-black text-xs">✓</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* 2. Beneficiary Options */}
+                      {VOICE_INPUT_STEPS[activeVoiceIndex].key === 'beneficiary' && (
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto p-1">
+                          {BENEFICIARY_OPTIONS.map(b => {
+                            const isSelected = formData.beneficiary === b;
+                            return (
+                              <button
+                                key={b}
+                                type="button"
+                                onClick={() => {
+                                  setFormData(prev => ({ ...prev, beneficiary: b }));
+                                  setVoiceFeedback(`✅ Επιλέχθηκε: ${b}`);
+                                }}
+                                className={`w-full p-2 rounded-xl border text-left transition flex items-center justify-between text-xs ${isSelected ? 'ring-2 ring-indigo-600 bg-white border-indigo-500 font-black shadow-sm' : 'bg-white/80 border-slate-200 hover:bg-white text-slate-700'}`}
+                              >
+                                <span>{b}</span>
+                                {isSelected && <span className="text-indigo-600 font-black text-sm">✓</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* 3. Member / Payer Options */}
+                      {VOICE_INPUT_STEPS[activeVoiceIndex].key === 'memberId' && (
+                        <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto p-1">
+                          {members.map(m => {
+                            const isSelected = formData.memberId === m.id;
+                            return (
+                              <button
+                                key={m.id}
+                                type="button"
+                                onClick={() => {
+                                  setFormData(prev => ({ ...prev, memberId: m.id }));
+                                  setVoiceFeedback(`✅ Επιλέχθηκε: ${m.name}`);
+                                }}
+                                className={`p-2 rounded-xl border text-left transition flex items-center gap-2 text-xs ${isSelected ? 'ring-2 ring-indigo-600 bg-white border-indigo-500 font-black shadow-sm' : 'bg-white/80 border-slate-200 hover:bg-white text-slate-700'}`}
+                              >
+                                <span className={`w-2.5 h-2.5 rounded-full ${m.color.split(' ')[0]}`}></span>
+                                <span className="flex-1">{m.name} ({m.role})</span>
+                                {isSelected && <span className="text-indigo-600 font-black text-xs">✓</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* 4. Payment Method Options */}
+                      {VOICE_INPUT_STEPS[activeVoiceIndex].key === 'paymentMethod' && (
+                        <div className="grid grid-cols-2 gap-1.5 p-1">
+                          {[
+                            { id: 'Card', label: '💳 Κάρτα' },
+                            { id: 'Μετρητά', label: '💵 Μετρητά' },
+                            { id: 'Πάγια', label: '🔄 Πάγια Εντολή' },
+                            { id: 'Bank Transfer', label: '🏦 Κατάθεση' }
+                          ].map(pm => {
+                            const isSelected = formData.paymentMethod === pm.id;
+                            return (
+                              <button
+                                key={pm.id}
+                                type="button"
+                                onClick={() => {
+                                  setFormData(prev => ({ ...prev, paymentMethod: pm.id }));
+                                  setVoiceFeedback(`✅ Επιλέχθηκε: ${pm.label}`);
+                                }}
+                                className={`p-2 rounded-xl border text-left transition flex items-center justify-between text-xs ${isSelected ? 'ring-2 ring-indigo-600 bg-white border-indigo-500 font-black shadow-sm' : 'bg-white/80 border-slate-200 hover:bg-white text-slate-700'}`}
+                              >
+                                <span>{pm.label}</span>
+                                {isSelected && <span className="text-indigo-600 font-black text-xs">✓</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      <div className="flex justify-between items-center pt-2 border-t border-indigo-200/80">
+                        <button
+                          type="button"
+                          onClick={handleVoiceRetry}
+                          className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-900 rounded-lg text-xs font-bold transition flex items-center gap-1"
+                        >
+                          <span>🔄</span>
+                          <span>Ξαναπέστο</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleVoiceNext}
+                          className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow"
+                        >
+                          <span>Επόμενο</span>
+                          <span>➡️</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <form onSubmit={handleCreateManualExpense} className="space-y-3">
                     {/* Dual Dates: Receipt Date from Photo & Registration Timestamp */}
                     <div className="grid grid-cols-2 gap-3 bg-indigo-50/40 p-3 rounded-2xl border border-indigo-100">
                       <div>
-                        <label className="text-[11px] font-bold text-indigo-900 block mb-1">📅 Ημερομηνία Απόδειξης</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-indigo-900 block">📅 Ημερομηνία Απόδειξης</label>
+                          {isVoiceActive && activeVoiceIndex === 0 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <input
                           type="text"
                           value={formData.date}
                           onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold bg-white text-indigo-900"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(0); }}
+                          className={`w-full px-3 py-2 border rounded-xl text-xs font-bold bg-white text-indigo-900 transition ${isVoiceActive && activeVoiceIndex === 0 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                           placeholder="ΗΗ/ΜΜ/ΕΕΕΕ"
                           required
                         />
-                        <span className="text-[9px] text-indigo-600">Από τη φωτογραφία</span>
+                        <span className="text-[9px] text-indigo-600">Απόδειξη</span>
                       </div>
                       <div>
                         <label className="text-[11px] font-bold text-slate-600 block mb-1">⏰ Ημερομηνία Καταχώρησης</label>
@@ -3042,24 +3511,36 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-700 block mb-1">🏪 Προμηθευτής / Κατάστημα</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-slate-700 block">🏪 Προμηθευτής / Κατάστημα</label>
+                          {isVoiceActive && activeVoiceIndex === 1 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <input
                           type="text"
                           value={formData.merchant}
                           onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-bold text-slate-800"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(1); }}
+                          className={`w-full px-3 py-2 border rounded-xl text-xs font-bold text-slate-800 transition ${isVoiceActive && activeVoiceIndex === 1 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                           placeholder="π.χ. AB Vassilopoulos, Lidl, EKO"
                           required
                         />
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-emerald-700 block mb-1">💶 Συνολικό Ποσό (€)</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-emerald-700 block">💶 Συνολικό Ποσό (€)</label>
+                          {isVoiceActive && activeVoiceIndex === 2 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <input
                           type="number"
-                          step="0.01"
+                          step="any"
                           value={formData.total}
                           onChange={(e) => setFormData({ ...formData, total: e.target.value })}
-                          className="w-full px-3 py-2 border border-emerald-300 rounded-xl text-xs font-black text-emerald-700 bg-emerald-50/60"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(2); }}
+                          className={`w-full px-3 py-2 border border-emerald-300 rounded-xl text-xs font-black text-emerald-700 bg-emerald-50/60 transition ${isVoiceActive && activeVoiceIndex === 2 ? 'ring-4 ring-emerald-500/40 border-emerald-600' : ''}`}
                           placeholder="0.00"
                           required
                         />
@@ -3067,33 +3548,51 @@
                     </div>
 
                     <div>
-                      <label className="text-[11px] font-bold text-slate-700 block mb-1">📝 Αγορασθέντα Είδη / Υποκατηγορία</label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-bold text-slate-700 block">📝 Αγορασθέντα Είδη / Υποκατηγορία</label>
+                        {isVoiceActive && activeVoiceIndex === 3 && (
+                          <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                        )}
+                      </div>
                       <input
                         type="text"
                         value={formData.subcategory}
                         onChange={(e) => setFormData({ ...formData, subcategory: e.target.value })}
-                        className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
+                        onClick={() => { if (isVoiceActive) startListeningForStep(3); }}
+                        className={`w-full px-3 py-2 border rounded-xl text-xs font-semibold transition ${isVoiceActive && activeVoiceIndex === 3 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                         placeholder="π.χ. Γάλα, Ψωμί, Τυρί (εξήχθησαν από OCR)"
                       />
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-indigo-700 block mb-1">🏷️ Κατηγορία Εξόδου</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-indigo-700 block">🏷️ Κατηγορία Εξόδου</label>
+                          {isVoiceActive && activeVoiceIndex === 4 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <select
                           value={formData.category}
                           onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                          className="w-full px-3 py-2 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-900 bg-indigo-50/30"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(4); }}
+                          className={`w-full px-3 py-2 border border-indigo-200 rounded-xl text-xs font-bold text-indigo-900 bg-indigo-50/30 transition ${isVoiceActive && activeVoiceIndex === 4 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                         >
                           {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                         </select>
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-indigo-700 block mb-1">🎯 Ποιον αφορά;</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-indigo-700 block">🎯 Ποιον αφορά;</label>
+                          {isVoiceActive && activeVoiceIndex === 5 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <select
                           value={formData.beneficiary}
                           onChange={(e) => setFormData({ ...formData, beneficiary: e.target.value })}
-                          className="w-full px-3 py-2 border border-indigo-300 bg-indigo-50 rounded-xl text-xs font-bold text-indigo-900"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(5); }}
+                          className={`w-full px-3 py-2 border border-indigo-300 bg-indigo-50 rounded-xl text-xs font-bold text-indigo-900 transition ${isVoiceActive && activeVoiceIndex === 5 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                         >
                           {BENEFICIARY_OPTIONS.map(b => <option key={b} value={b}>{b}</option>)}
                         </select>
@@ -3102,21 +3601,33 @@
 
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">👤 Πληρωτής (Μέλος)</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-slate-500 block">👤 Πληρωτής (Μέλος)</label>
+                          {isVoiceActive && activeVoiceIndex === 6 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <select
                           value={formData.memberId}
                           onChange={(e) => setFormData({ ...formData, memberId: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(6); }}
+                          className={`w-full px-3 py-2 border rounded-xl text-xs font-semibold transition ${isVoiceActive && activeVoiceIndex === 6 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                         >
                           {members.map(m => <option key={m.id} value={m.id}>{m.name} ({m.role})</option>)}
                         </select>
                       </div>
                       <div>
-                        <label className="text-[11px] font-bold text-slate-500 block mb-1">💳 Τρόπος Πληρωμής</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px] font-bold text-slate-500 block">💳 Τρόπος Πληρωμής</label>
+                          {isVoiceActive && activeVoiceIndex === 7 && (
+                            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-indigo-600 text-white animate-pulse">🎙️ Ενεργό</span>
+                          )}
+                        </div>
                         <select
                           value={formData.paymentMethod}
                           onChange={(e) => setFormData({ ...formData, paymentMethod: e.target.value })}
-                          className="w-full px-3 py-2 border rounded-xl text-xs font-semibold"
+                          onClick={() => { if (isVoiceActive) startListeningForStep(7); }}
+                          className={`w-full px-3 py-2 border rounded-xl text-xs font-semibold transition ${isVoiceActive && activeVoiceIndex === 7 ? 'ring-4 ring-indigo-500/40 border-indigo-600' : ''}`}
                         >
                           <option value="Card">Κάρτα</option>
                           <option value="Μετρητά">Μετρητά</option>
@@ -3126,9 +3637,24 @@
                       </div>
                     </div>
 
-                    <div className="flex justify-end gap-2 pt-3 border-t">
-                      <button type="button" onClick={() => { setShowFormModal(false); setScanQueue([]); }} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-xs font-bold">Ακύρωση</button>
-                      <button type="submit" className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md flex items-center gap-1">
+                    <div className="flex justify-between items-center gap-2 pt-3 border-t">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          stopVoice();
+                          setIsVoiceActive(false);
+                          setShowFormModal(false);
+                          setScanQueue([]);
+                        }}
+                        className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition"
+                      >
+                        Ακύρωση
+                      </button>
+
+                      <button
+                        type="submit"
+                        className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black shadow-lg flex items-center gap-1.5 transition active:scale-95"
+                      >
                         <span>✅</span>
                         <span>{scanQueue.length > 0 ? 'Υποβολή & Επόμενη Απόδειξη' : 'Υποβολή & Καταχώρηση'}</span>
                       </button>
